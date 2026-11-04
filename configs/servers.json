@@ -1,0 +1,189 @@
+{
+  "version": "2.0.0",
+  "project": "JARO WPF",
+  "egress_validation_endpoints": [
+    {
+      "id": "iana-example",
+      "name": "IANA Example Domain (Non-DNS General Web)",
+      "url": "https://example.com/",
+      "host": "example.com",
+      "port": 443,
+      "sni": "example.com",
+      "is_dns_provider": false,
+      "expected_status": 200,
+      "expected_substring": "Example Domain"
+    },
+    {
+      "id": "google-generate204",
+      "name": "Google Connectivity Check (Non-DNS General Web)",
+      "url": "https://connectivitycheck.gstatic.com/generate_204",
+      "host": "connectivitycheck.gstatic.com",
+      "port": 443,
+      "sni": "connectivitycheck.gstatic.com",
+      "is_dns_provider": false,
+      "expected_status": 204,
+      "expected_substring": ""
+    },
+    {
+      "id": "cloudflare-trace",
+      "name": "Cloudflare Trace Endpoint",
+      "url": "https://one.one.one.one/cdn-cgi/trace",
+      "host": "1.1.1.1",
+      "port": 443,
+      "sni": "one.one.one.one",
+      "is_dns_provider": true,
+      "expected_status": 200,
+      "expected_substring": "fl="
+    }
+  ],
+  "servers": [
+    {
+      "id": "cloudflare-anycast",
+      "name": "Cloudflare Anycast",
+      "host": "1.1.1.1",
+      "hostname": "one.one.one.one",
+      "cost_tier": 0,
+      "authorized": true,
+      "protocols": {
+        "udp_dns": {
+          "category": "dns_service",
+          "port": 53,
+          "enabled": true
+        },
+        "tcp_dns": {
+          "category": "dns_service",
+          "port": 53,
+          "enabled": true
+        },
+        "dot": {
+          "category": "dns_service",
+          "port": 853,
+          "sni": "one.one.one.one",
+          "enabled": true
+        },
+        "https": {
+          "category": "application_transport",
+          "port": 443,
+          "sni": "one.one.one.one",
+          "path": "/cdn-cgi/trace",
+          "expected_status": 200,
+          "expected_substring": "fl=",
+          "enabled": true
+        },
+        "http3": {
+          "category": "application_transport",
+          "port": 443,
+          "sni": "one.one.one.one",
+          "path": "/cdn-cgi/trace",
+          "expected_status": 200,
+          "expected_substring": "fl=",
+          "enabled": true
+        }
+      }
+    },
+    {
+      "id": "google-anycast",
+      "name": "Google Public Edge",
+      "host": "8.8.8.8",
+      "hostname": "dns.google",
+      "cost_tier": 0,
+      "authorized": true,
+      "protocols": {
+        "udp_dns": {
+          "category": "dns_service",
+          "port": 53,
+          "enabled": true
+        },
+        "tcp_dns": {
+          "category": "dns_service",
+          "port": 53,
+          "enabled": true
+        },
+        "dot": {
+          "category": "dns_service",
+          "port": 853,
+          "sni": "dns.google",
+          "enabled": true
+        },
+        "https": {
+          "category": "application_transport",
+          "port": 443,
+          "sni": "dns.google",
+          "path": "/resolve?name=example.com&type=A",
+          "expected_status": 200,
+          "expected_substring": "\"Status\":0",
+          "enabled": true
+        },
+        "http3": {
+          "category": "application_transport",
+          "port": 443,
+          "sni": "dns.google",
+          "path": "/resolve?name=example.com&type=A",
+          "expected_status": 200,
+          "expected_substring": "\"Status\":0",
+          "enabled": true
+        }
+      }
+    },
+    {
+      "id": "quad9-anycast",
+      "name": "Quad9 Public DNS",
+      "host": "9.9.9.9",
+      "hostname": "dns.quad9.net",
+      "cost_tier": 0,
+      "authorized": true,
+      "protocols": {
+        "udp_dns": {
+          "category": "dns_service",
+          "port": 53,
+          "enabled": true
+        },
+        "tcp_dns": {
+          "category": "dns_service",
+          "port": 53,
+          "enabled": true
+        },
+        "dot": {
+          "category": "dns_service",
+          "port": 853,
+          "sni": "dns.quad9.net",
+          "enabled": true
+        }
+      }
+    },
+    {
+      "id": "adguard-doq",
+      "name": "AdGuard Public DoQ/DNS",
+      "host": "94.140.14.14",
+      "hostname": "dns.adguard-dns.com",
+      "cost_tier": 0,
+      "authorized": true,
+      "protocols": {
+        "udp_dns": {
+          "category": "dns_service",
+          "port": 53,
+          "enabled": true
+        },
+        "tcp_dns": {
+          "category": "dns_service",
+          "port": 53,
+          "enabled": true
+        },
+        "dot": {
+          "category": "dns_service",
+          "port": 853,
+          "sni": "dns.adguard-dns.com",
+          "enabled": true
+        },
+        "doq": {
+          "category": "dns_service",
+          "port": 853,
+          "sni": "dns.adguard-dns.com",
+          "enabled": true
+        }
+      }
+    }
+  ],
+  "authorized_ssh_tunnels": [],
+  "authorized_wireguard_tunnels": []
+}

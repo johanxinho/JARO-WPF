@@ -1,0 +1,127 @@
+# XcodeGen Specification — JARO WPF Native iOS Project
+# Organization: JARO COMPLEMETS
+# Generates `JaroWPF.xcodeproj` on macOS via: `xcodegen generate`
+name: JaroWPF
+options:
+  bundleIdPrefix: com.jarocomplements
+  deploymentTarget:
+    iOS: "16.0"
+  xcodeVersion: "15.4"
+  minimumXcodeGenVersion: "2.38.0"
+
+settings:
+  base:
+    ORGANIZATION_NAME: "JARO COMPLEMETS"
+    SWIFT_VERSION: "5.9"
+    IPHONEOS_DEPLOYMENT_TARGET: "16.0"
+    ENABLE_USER_SCRIPT_SANDBOXING: YES
+    LIBRARY_SEARCH_PATHS:
+      - $(inherited)
+      - /tmp/wireguard-apple/Sources/WireGuardKitGo/out
+      - /tmp/wireguard-apple/Sources/WireGuardKitGo
+
+packages:
+  JaroIOS:
+    path: .
+
+targets:
+  # External Build System hint for WireGuardKitGo (`libwg-go.a`), required by wireguard-apple on Xcode
+  # when linking WireGuardKit into JaroPacketTunnel (requires `brew install go` on macOS).
+  JaroApp:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Sources/JaroApp
+        excludes:
+          - Info.plist
+    info:
+      path: Sources/JaroApp/Info.plist
+    entitlements:
+      path: Config/JaroApp.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jarocomplements.jarowpf
+        PRODUCT_NAME: JaroWPF
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_ENTITLEMENTS: Config/JaroApp.entitlements
+    dependencies:
+      - package: JaroIOS
+        product: JaroCore
+      - package: JaroIOS
+        product: JaroSecurity
+      - package: JaroIOS
+        product: JaroProfiles
+      - package: JaroIOS
+        product: JaroDiagnostics
+      - target: JaroPacketTunnel
+        embed: true
+      - sdk: NetworkExtension.framework
+      - sdk: Security.framework
+      - sdk: Network.framework
+
+  JaroPacketTunnel:
+    type: app-extension
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Sources/JaroPacketTunnel
+        excludes:
+          - Info.plist
+    info:
+      path: Sources/JaroPacketTunnel/Info.plist
+    entitlements:
+      path: Config/JaroPacketTunnel.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jarocomplements.jarowpf.PacketTunnel
+        PRODUCT_NAME: JaroPacketTunnel
+        TARGETED_DEVICE_FAMILY: "1"
+        APPLICATION_EXTENSION_API_ONLY: YES
+        CODE_SIGN_ENTITLEMENTS: Config/JaroPacketTunnel.entitlements
+    dependencies:
+      - package: JaroIOS
+        product: JaroTunnelEngine
+      - package: JaroIOS
+        product: JaroCore
+      - package: JaroIOS
+        product: JaroSecurity
+      - package: JaroIOS
+        product: JaroProfiles
+      - package: JaroIOS
+        product: JaroDiagnostics
+      - sdk: NetworkExtension.framework
+      - sdk: Security.framework
+      - sdk: Network.framework
+
+  JaroAppStandalone:
+    type: application
+    platform: iOS
+    deploymentTarget: "16.0"
+    sources:
+      - path: Sources/JaroApp
+        excludes:
+          - Info.plist
+    info:
+      path: Sources/JaroApp/Info.plist
+    entitlements:
+      path: Config/JaroAppStandalone.entitlements
+    settings:
+      base:
+        PRODUCT_BUNDLE_IDENTIFIER: com.jarocomplements.jarowpf.standalone
+        PRODUCT_NAME: JaroWPF-Standalone
+        TARGETED_DEVICE_FAMILY: "1"
+        CODE_SIGN_ENTITLEMENTS: Config/JaroAppStandalone.entitlements
+    dependencies:
+      - package: JaroIOS
+        product: JaroCore
+      - package: JaroIOS
+        product: JaroSecurity
+      - package: JaroIOS
+        product: JaroProfiles
+      - package: JaroIOS
+        product: JaroDiagnostics
+      - package: JaroIOS
+        product: JaroTunnelEngine
+      - sdk: Security.framework
+      - sdk: Network.framework

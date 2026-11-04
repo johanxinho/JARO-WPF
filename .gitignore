@@ -1,0 +1,42 @@
+# JARO WPF — Git Ignore File
+# Security & Build Artifact Protection
+
+# Python Virtual Environments & Caches
+.venv/
+venv/
+env/
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.pytest_cache/
+.coverage
+htmlcov/
+
+# Local Vault & Confidential Test Secrets
+*.wg.conf
+*.key
+*.pem
+*.p12
+*.mobileprovision
+*.jaroprofile
+!examples/*.jaroprofile
+!configs/*.json
+
+# Swift & Xcode Build Artifacts
+.build/
+build/
+DerivedData/
+*.xcodeproj
+!ios/JaroWPF.xcodeproj
+*.xcworkspace
+*.xcarchive
+*.ipa
+*.dSYM/
+.swiftpm/
+
+# macOS / Linux Metadata
+.DS_Store
+Thumbs.db
+*.swp
+*~

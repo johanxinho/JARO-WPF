@@ -1,0 +1,16 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+    <!-- Standalone Variant B: Excludes com.apple.developer.networking.networkextension
+         to permit legitimate signing with free Personal Team Apple ID ($0 COP) -->
+    <key>com.apple.security.application-groups</key>
+    <array>
+        <string>group.com.jarocomplements.jarowpf</string>
+    </array>
+    <key>keychain-access-groups</key>
+    <array>
+        <string>$(AppIdentifierPrefix)group.com.jarocomplements.jarowpf</string>
+    </array>
+</dict>
+</plist>

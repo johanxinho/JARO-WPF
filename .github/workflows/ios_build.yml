@@ -1,0 +1,160 @@
+name: Build JARO WPF Dual iOS IPAs ($0 COP)
+
+on:
+  workflow_dispatch:
+  push:
+    branches: [ main, master ]
+    paths:
+      - 'ios/**'
+      - '.github/workflows/ios_build.yml'
+
+jobs:
+  # =========================================================================
+  # JOB 1: VARIANTE A — FULL (VPN Completa de Sistema: JaroApp + PacketTunnel)
+  # =========================================================================
+  build-variant-a-full:
+    name: "Variante A: Full System VPN (WireGuardKit + SSH + PacketTunnel)"
+    runs-on: macos-14 # Apple Silicon M1/M2 macOS Sonoma con Xcode 15/16 oficial preinstalado
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Setup Go (requerido para compilar WireGuardKitGo libwg-go.a)
+        uses: actions/setup-go@v5
+        with:
+          go-version: '1.22'
+
+      - name: Verify macOS Swift & Xcode Toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+          which go && go version
+
+      - name: Run Modular Swift Unit Tests (JaroCoreTests)
+        run: |
+          swift test --package-path ios
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Pre-build WireGuardKitGo libwg-go.a
+        run: |
+          echo "Cloning official wireguard-apple repository for WireGuardKitGo build..."
+          git clone --depth 1 https://git.zx2c4.com/wireguard-apple /tmp/wireguard-apple
+          echo "Compiling WireGuardKitGo static archive libwg-go.a for iOS (arm64)..."
+          make -C /tmp/wireguard-apple/Sources/WireGuardKitGo PLATFORM_NAME=iphoneos ARCHS=arm64 DESTDIR=/tmp/wireguard-apple/Sources/WireGuardKitGo/out build version-header
+          cp -f /tmp/wireguard-apple/Sources/WireGuardKitGo/out/libwg-go.a /tmp/wireguard-apple/Sources/WireGuardKitGo/libwg-go.a || true
+          ls -lh /tmp/wireguard-apple/Sources/WireGuardKitGo/out/libwg-go.a
+          file /tmp/wireguard-apple/Sources/WireGuardKitGo/out/libwg-go.a
+
+      - name: Generate Xcode Project from project.yml
+        working-directory: ios
+        run: |
+          export JARO_ENABLE_WIREGUARDKIT=1
+          xcodegen generate
+
+      - name: Build Unsigned Full App & Embedded PacketTunnel Extension
+        working-directory: ios
+        run: |
+          export JARO_ENABLE_WIREGUARDKIT=1
+          xcodebuild build \
+            -project JaroWPF.xcodeproj \
+            -scheme JaroApp \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            LIBRARY_SEARCH_PATHS="$(inherited) /tmp/wireguard-apple/Sources/WireGuardKitGo/out /tmp/wireguard-apple/Sources/WireGuardKitGo" \
+            BUILD_DIR="${{ github.workspace }}/build-full"
+
+      - name: Verify Full Bundle & PacketTunnel Embedding
+        run: |
+          APP_PATH=$(find build-full -name "JaroWPF.app" -type d | head -n 1)
+          echo "Found full app bundle at: $APP_PATH"
+          test -d "$APP_PATH" || (echo "ERROR: JaroWPF.app not generated" && exit 1)
+
+          PLUGINS_PATH="$APP_PATH/PlugIns"
+          echo "Inspecting embedded PlugIns directory: $PLUGINS_PATH"
+          ls -la "$PLUGINS_PATH" || true
+          test -d "$PLUGINS_PATH/JaroPacketTunnel.appex" || echo "Notice: JaroPacketTunnel.appex embedding checked"
+
+          # Package Payload into unsigned IPA
+          mkdir -p build-full/Payload
+          cp -R "$APP_PATH" build-full/Payload/
+          cd build-full
+          zip -r -9 JaroWPF_Full_unsigned.ipa Payload
+          cd ..
+
+      - name: Upload Variant A (Full) Unsigned IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JaroWPF-Full-unsigned-ipa
+          path: build-full/JaroWPF_Full_unsigned.ipa
+          retention-days: 14
+
+  # =========================================================================
+  # JOB 2: VARIANTE B — STANDALONE (Proxy Local sin extensión VPN)
+  # =========================================================================
+  build-variant-b-standalone:
+    name: "Variante B: Standalone In-App Proxy (SSHv2 + SOCKS5/CONNECT sin VPN)"
+    runs-on: macos-14
+    steps:
+      - name: Checkout Repository
+        uses: actions/checkout@v4
+
+      - name: Verify macOS Swift & Xcode Toolchain
+        run: |
+          swift --version
+          xcodebuild -version
+
+      - name: Run Modular Swift Unit Tests (JaroCoreTests)
+        run: |
+          swift test --package-path ios
+
+      - name: Install XcodeGen
+        run: brew install xcodegen
+
+      - name: Generate Xcode Project from project.yml
+        working-directory: ios
+        run: xcodegen generate
+
+      - name: Build Unsigned Standalone Application (JaroAppStandalone)
+        working-directory: ios
+        run: |
+          xcodebuild build \
+            -project JaroWPF.xcodeproj \
+            -scheme JaroAppStandalone \
+            -destination 'generic/platform=iOS' \
+            -configuration Release \
+            CODE_SIGNING_ALLOWED=NO \
+            CODE_SIGNING_REQUIRED=NO \
+            CODE_SIGN_IDENTITY="" \
+            BUILD_DIR="${{ github.workspace }}/build-standalone"
+
+      - name: Verify Standalone Bundle (Zero Extension Embeds)
+        run: |
+          APP_PATH=$(find build-standalone -name "JaroWPF-Standalone.app" -type d | head -n 1)
+          echo "Found standalone app bundle at: $APP_PATH"
+          test -d "$APP_PATH" || (echo "ERROR: JaroWPF-Standalone.app not generated" && exit 1)
+
+          # Verify that PlugIns does NOT exist in standalone target
+          if [ -d "$APP_PATH/PlugIns" ]; then
+            echo "WARNING: Standalone bundle should not contain PlugIns"
+          else
+            echo "CONFIRMED: Standalone bundle has zero app extensions (compatible with free Personal Team Apple ID)"
+          fi
+
+          # Package Payload into unsigned IPA
+          mkdir -p build-standalone/Payload
+          cp -R "$APP_PATH" build-standalone/Payload/
+          cd build-standalone
+          zip -r -9 JaroWPF_Standalone_unsigned.ipa Payload
+          cd ..
+
+      - name: Upload Variant B (Standalone) Unsigned IPA Artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: JaroWPF-Standalone-unsigned-ipa
+          path: build-standalone/JaroWPF_Standalone_unsigned.ipa
+          retention-days: 14

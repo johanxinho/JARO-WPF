@@ -1,0 +1,25 @@
+{
+  "version": "3.0.0",
+  "project": "JARO WPF",
+  "default_policies": {
+    "allow_metered_probes": false,
+    "allow_unknown_cost_probes": true,
+    "allow_external_lab_on_unknown_cost": false,
+    "assume_ethernet_is_free": false,
+    "max_session_probe_bytes": 262144,
+    "max_single_bandwidth_test_bytes": 65536
+  },
+  "manual_interface_profiles": {},
+  "authorized_bandwidth_endpoints": [
+    {
+      "id": "cloudflare-speed-authorized",
+      "name": "Cloudflare Public Speed Measurement",
+      "authorized": true,
+      "download_url": "https://speed.cloudflare.com/__down?bytes=16384",
+      "upload_url": "https://speed.cloudflare.com/__up",
+      "sni": "speed.cloudflare.com",
+      "max_download_bytes": 16384,
+      "max_upload_bytes": 8192
+    }
+  ]
+}
