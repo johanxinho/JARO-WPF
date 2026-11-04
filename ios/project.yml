@@ -55,6 +55,8 @@ targets:
         product: JaroProfiles
       - package: JaroIOS
         product: JaroDiagnostics
+      - package: JaroIOS
+        product: JaroTunnelEngine
       - target: JaroPacketTunnel
         embed: true
       - sdk: NetworkExtension.framework
