@@ -15,7 +15,7 @@ var packageDependencies: [Package.Dependency] = [
     // Apple Network.framework integration (`NIOTSConnectionBootstrap`) for iOS battery/memory efficiency (Apache-2.0)
     .package(url: "https://github.com/apple/swift-nio-transport-services.git", from: "1.21.0"),
     // In-process SSHv2 protocol & DirectTCPIP channels without spawning external binaries (Apache-2.0)
-    .package(url: "https://github.com/apple/swift-nio-ssh.git", from: "0.15.0"),
+    .package(url: "https://github.com/apple/swift-nio-ssh.git", "0.9.0"..<"0.12.0"),
     // Cross-platform Swift Crypto primitives (Curve25519, Ed25519, SHA256) (Apache-2.0)
     .package(url: "https://github.com/apple/swift-crypto.git", from: "3.4.0"),
 ]
