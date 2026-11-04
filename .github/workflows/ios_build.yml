@@ -86,7 +86,11 @@ jobs:
           PLUGINS_PATH="$APP_PATH/PlugIns"
           echo "Inspecting embedded PlugIns directory: $PLUGINS_PATH"
           ls -la "$PLUGINS_PATH" || true
-          test -d "$PLUGINS_PATH/JaroPacketTunnel.appex" || echo "Notice: JaroPacketTunnel.appex embedding checked"
+          test -d "$PLUGINS_PATH/JaroPacketTunnel.appex" || (echo "ERROR: JaroPacketTunnel.appex missing" && exit 1)
+
+          # Ensure NSExtension metadata is present in JaroPacketTunnel.appex Info.plist
+          plutil -insert NSExtension -xml '<dict><key>NSExtensionPointIdentifier</key><string>com.apple.networkextension.packet-tunnel</string><key>NSExtensionPrincipalClass</key><string>JaroPacketTunnel.PacketTunnelProvider</string></dict>' "$PLUGINS_PATH/JaroPacketTunnel.appex/Info.plist" 2>/dev/null || true
+          plutil -p "$PLUGINS_PATH/JaroPacketTunnel.appex/Info.plist"
 
           # Package Payload into unsigned IPA
           mkdir -p build-full/Payload

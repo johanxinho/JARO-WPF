@@ -73,6 +73,10 @@ targets:
           - Info.plist
     info:
       path: Sources/JaroPacketTunnel/Info.plist
+      properties:
+        NSExtension:
+          NSExtensionPointIdentifier: com.apple.networkextension.packet-tunnel
+          NSExtensionPrincipalClass: $(PRODUCT_MODULE_NAME).PacketTunnelProvider
     entitlements:
       path: Config/JaroPacketTunnel.entitlements
     settings:
