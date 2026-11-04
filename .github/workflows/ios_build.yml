@@ -55,6 +55,7 @@ jobs:
         working-directory: ios
         run: |
           export JARO_ENABLE_WIREGUARDKIT=1
+          export JARO_WIREGUARD_URL=/tmp/wireguard-apple
           xcodegen generate
           sed -i '' 's/objectVersion = 77;/objectVersion = 60;/g' JaroWPF.xcodeproj/project.pbxproj || true
           sed -i '' 's/compatibilityVersion = "Xcode 16.0"/compatibilityVersion = "Xcode 15.0"/g' JaroWPF.xcodeproj/project.pbxproj || true
@@ -64,6 +65,7 @@ jobs:
         working-directory: ios
         run: |
           export JARO_ENABLE_WIREGUARDKIT=1
+          export JARO_WIREGUARD_URL=/tmp/wireguard-apple
           xcodebuild build \
             -project JaroWPF.xcodeproj \
             -scheme JaroApp \
