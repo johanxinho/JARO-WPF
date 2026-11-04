@@ -165,8 +165,12 @@ public struct JaroMainView: View {
     private var importWireGuardSheet: some View {
         NavigationStack {
             Form {
+                #if os(iOS)
                 TextField("ID del perfil (ej. wg-propio-01)", text: $wgProfileIdInput)
                     .textInputAutocapitalization(.never)
+                #else
+                TextField("ID del perfil (ej. wg-propio-01)", text: $wgProfileIdInput)
+                #endif
                 TextField("Nombre visible", text: $wgDisplayNameInput)
                 TextEditor(text: $wgConfTextInput)
                     .frame(minHeight: 180)
