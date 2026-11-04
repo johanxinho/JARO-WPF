@@ -34,8 +34,13 @@ var tunnelEngineDependencies: [Target.Dependency] = [
 if enableWireGuardKit {
     // Official WireGuardKit (MIT License — WireGuard is a registered trademark of Jason A. Donenfeld;
     // JARO WPF uses independent "JARO WPF" / "JARO COMPLEMETS" branding).
+    let wgURL = Context.environment["JARO_WIREGUARD_URL"] ?? (
+        FileManager.default.fileExists(atPath: "/tmp/wireguard-apple/Package.swift")
+            ? "/tmp/wireguard-apple"
+            : "https://git.zx2c4.com/wireguard-apple"
+    )
     packageDependencies.append(
-        .package(url: "https://git.zx2c4.com/wireguard-apple", branch: "master")
+        .package(url: wgURL, branch: "master")
     )
     tunnelEngineDependencies.append(
         .product(name: "WireGuardKit", package: "wireguard-apple")

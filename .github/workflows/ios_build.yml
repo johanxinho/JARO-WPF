@@ -45,7 +45,11 @@ jobs:
           make -C /tmp/wireguard-apple/Sources/WireGuardKitGo PLATFORM_NAME=iphoneos ARCHS=arm64 DESTDIR=/tmp/wireguard-apple/Sources/WireGuardKitGo/out build version-header
           cp -f /tmp/wireguard-apple/Sources/WireGuardKitGo/out/libwg-go.a /tmp/wireguard-apple/Sources/WireGuardKitGo/libwg-go.a || true
           ls -lh /tmp/wireguard-apple/Sources/WireGuardKitGo/out/libwg-go.a
-          file /tmp/wireguard-apple/Sources/WireGuardKitGo/out/libwg-go.a
+          echo "Patching wireguard-apple Package.swift tools-version for Swift 5.10 / Xcode 15..."
+          sed -i '' 's/swift-tools-version:5.3/swift-tools-version:5.7/g' /tmp/wireguard-apple/Package.swift
+          git -C /tmp/wireguard-apple config user.email "ci@jarocomplements.test"
+          git -C /tmp/wireguard-apple config user.name "CI"
+          git -C /tmp/wireguard-apple commit -am "fix(spm): bump tools-version to 5.7 for iOS 15 / macOS 12 compatibility"
 
       - name: Generate Xcode Project from project.yml
         working-directory: ios
