@@ -35,7 +35,7 @@ if enableWireGuardKit {
     // Official WireGuardKit (MIT License — WireGuard is a registered trademark of Jason A. Donenfeld;
     // JARO WPF uses independent "JARO WPF" / "JARO COMPLEMETS" branding).
     packageDependencies.append(
-        .package(url: "https://git.zx2c4.com/wireguard-apple", from: "1.0.16")
+        .package(url: "https://git.zx2c4.com/wireguard-apple", branch: "master")
     )
     tunnelEngineDependencies.append(
         .product(name: "WireGuardKit", package: "wireguard-apple")
