@@ -8,6 +8,7 @@ options:
     iOS: "16.0"
   xcodeVersion: "15.4"
   minimumXcodeGenVersion: "2.38.0"
+  projectFormat: "15.0"
 
 settings:
   base:

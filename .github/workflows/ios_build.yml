@@ -52,6 +52,9 @@ jobs:
         run: |
           export JARO_ENABLE_WIREGUARDKIT=1
           xcodegen generate
+          sed -i '' 's/objectVersion = 77;/objectVersion = 60;/g' JaroWPF.xcodeproj/project.pbxproj || true
+          sed -i '' 's/compatibilityVersion = "Xcode 16.0"/compatibilityVersion = "Xcode 15.0"/g' JaroWPF.xcodeproj/project.pbxproj || true
+          grep -E "(objectVersion|compatibilityVersion)" JaroWPF.xcodeproj/project.pbxproj | head -n 5
 
       - name: Build Unsigned Full App & Embedded PacketTunnel Extension
         working-directory: ios
@@ -117,7 +120,11 @@ jobs:
 
       - name: Generate Xcode Project from project.yml
         working-directory: ios
-        run: xcodegen generate
+        run: |
+          xcodegen generate
+          sed -i '' 's/objectVersion = 77;/objectVersion = 60;/g' JaroWPF.xcodeproj/project.pbxproj || true
+          sed -i '' 's/compatibilityVersion = "Xcode 16.0"/compatibilityVersion = "Xcode 15.0"/g' JaroWPF.xcodeproj/project.pbxproj || true
+          grep -E "(objectVersion|compatibilityVersion)" JaroWPF.xcodeproj/project.pbxproj | head -n 5
 
       - name: Build Unsigned Standalone Application (JaroAppStandalone)
         working-directory: ios
