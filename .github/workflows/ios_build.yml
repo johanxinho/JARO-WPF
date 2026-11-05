@@ -3,7 +3,7 @@ name: Build JARO WPF Dual iOS IPAs ($0 COP)
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master ]
+    branches: [ main, master, 'feature/**' ]
     paths:
       - 'ios/**'
       - '.github/workflows/ios_build.yml'

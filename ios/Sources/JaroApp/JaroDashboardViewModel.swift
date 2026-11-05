@@ -62,6 +62,72 @@ public final class JaroDashboardViewModel: ObservableObject {
         }
     }
 
+    /// Imports an SSH profile and stores the raw Ed25519 seed only in Keychain.
+    /// The profile JSON contains a keychain URI, never private key material.
+    public func importSSHProfile(
+        profileId: String,
+        displayName: String,
+        host: String,
+        port: Int,
+        username: String,
+        fingerprint: String,
+        privateKeySeedBase64: String
+    ) {
+        let normalizedID = profileId.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedHost = host.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedUser = username.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedFingerprint = fingerprint.trimmingCharacters(in: .whitespacesAndNewlines)
+        let normalizedSeed = privateKeySeedBase64.trimmingCharacters(in: .whitespacesAndNewlines)
+
+        guard let seed = Data(base64Encoded: normalizedSeed), seed.count == 32 else {
+            statusBannerMessage = "La clave debe ser la semilla privada Ed25519 de 32 bytes codificada en Base64."
+            tunnelState = .failed
+            return
+        }
+
+        let secretURI = "keychain://\(JaroConstants.appGroupIdentifier)/ssh/\(normalizedID)/private_key"
+        do {
+            let profile = JaroPortableProfile(
+                profileId: normalizedID,
+                displayName: displayName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty ? normalizedID : displayName,
+                tunnelProtocol: .sshSocks5,
+                host: normalizedHost,
+                port: port,
+                scope: "remote",
+                authorized: true,
+                includeDefaultRoute: false,
+                includedRoutes: [],
+                mtu: 1420,
+                cryptoReferences: JaroCryptoReferences(keychainSecretRef: secretURI),
+                sshSocks5: JaroSSHSocksSection(
+                    username: normalizedUser,
+                    pinnedHostKeySHA256: normalizedFingerprint,
+                    localProxyPort: 1080,
+                    supportsHTTPConnectBridge: true
+                )
+            )
+            try JaroProfileManager.validateProfile(profile)
+            try secretStore.storeSecret(seed, forURI: secretURI)
+            do {
+                try profileManager.upsertProfile(profile, persist: true)
+            } catch {
+                try? secretStore.deleteSecret(forURI: secretURI)
+                throw error
+            }
+            selectedProfileId = profile.profileId
+            isStandaloneMode = true
+            refreshProfilesAndReadiness()
+            statusBannerMessage = "Perfil SSH guardado. Modo Standalone seleccionado; listo para probar la conexión SSH."
+            logBuffer.append(level: "INFO", component: "JaroApp", message: "SSH profile '\(normalizedID)' stored; private key kept in Keychain.")
+            recentLogs = logBuffer.snapshot(limit: 40)
+        } catch {
+            tunnelState = .failed
+            statusBannerMessage = JaroSecretRedactor.redact(error.localizedDescription)
+            logBuffer.append(level: "ERROR", component: "JaroApp", message: error.localizedDescription)
+            recentLogs = logBuffer.snapshot(limit: 40)
+        }
+    }
+
     public func importWireGuardConfiguration(
         profileId: String,
         displayName: String,
