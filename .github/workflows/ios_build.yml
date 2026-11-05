@@ -14,7 +14,7 @@ jobs:
   # =========================================================================
   build-variant-a-full:
     name: "Variante A: Full System VPN (WireGuardKit + SSH + PacketTunnel)"
-    runs-on: macos-14 # Apple Silicon M1/M2 macOS Sonoma con Xcode 15/16 oficial preinstalado
+    runs-on: macos-15 # Apple Silicon M1/M2 macOS Sonoma con Xcode 15/16 oficial preinstalado
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
@@ -111,7 +111,7 @@ jobs:
   # =========================================================================
   build-variant-b-standalone:
     name: "Variante B: Standalone In-App Proxy (SSHv2 + SOCKS5/CONNECT sin VPN)"
-    runs-on: macos-14
+    runs-on: macos-15
     steps:
       - name: Checkout Repository
         uses: actions/checkout@v4
