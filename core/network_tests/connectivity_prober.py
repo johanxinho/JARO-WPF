@@ -43,30 +43,126 @@ def _create_verified_ssl_context() -> ssl.SSLContext:
     return _SHARED_SSL_CONTEXT
 
 
-def parse_dns_response_ips(response: bytes, expected_txid: int) -> Dict[str, Any]:
-    """Validates RFC 1035 DNS packet header and extracts RCODE and answer count."""
+def _read_dns_name(packet: bytes, offset: int) -> tuple[str, int]:
+    """Decode an RFC 1035 name and return (name, next offset), validating compression pointers."""
+    labels: List[str] = []
+    cursor = offset
+    next_offset: Optional[int] = None
+    visited: set[int] = set()
+    while True:
+        if cursor >= len(packet) or cursor in visited:
+            raise ValueError("Truncated or cyclic DNS name")
+        visited.add(cursor)
+        length = packet[cursor]
+        if length & 0xC0 == 0xC0:
+            if cursor + 1 >= len(packet):
+                raise ValueError("Truncated DNS compression pointer")
+            pointer = ((length & 0x3F) << 8) | packet[cursor + 1]
+            if pointer >= cursor:
+                raise ValueError("DNS compression pointer must reference prior packet data")
+            if next_offset is None:
+                next_offset = cursor + 2
+            cursor = pointer
+            continue
+        if length & 0xC0:
+            raise ValueError("Reserved DNS label encoding")
+        cursor += 1
+        if length == 0:
+            return ".".join(labels), next_offset if next_offset is not None else cursor
+        if length > 63 or cursor + length > len(packet):
+            raise ValueError("Invalid or truncated DNS label")
+        if sum(len(label) + 1 for label in labels) + length + 2 > 255:
+            raise ValueError("DNS name exceeds the 255-byte wire limit")
+        try:
+            labels.append(packet[cursor:cursor + length].decode("ascii"))
+        except UnicodeDecodeError as exc:
+            raise ValueError("Non-ASCII DNS label") from exc
+        cursor += length
+
+
+def parse_dns_response_ips(
+    response: bytes,
+    expected_txid: int,
+    expected_question: Optional[str] = None,
+) -> Dict[str, Any]:
+    """Validates the DNS header, question and bounded resource-record sections."""
     if len(response) < 12:
         return {"valid": False, "error": "Packet shorter than 12-byte DNS header"}
 
     txid, flags, qdcount, ancount, nscount, arcount = struct.unpack("!HHHHHH", response[:12])
-    is_response = bool(flags & 0x8000)
     rcode = flags & 0x000F
-
     if txid != expected_txid:
         return {"valid": False, "error": f"Transaction ID mismatch ({txid} != {expected_txid})"}
-    if not is_response:
+    if not flags & 0x8000:
         return {"valid": False, "error": "QR bit is 0 (not a response)"}
+    if flags & 0x7800:
+        return {"valid": False, "error": "Unsupported DNS opcode in response"}
+    if flags & 0x0200:
+        return {"valid": False, "error": "Truncated DNS response"}
     if rcode != 0:
         return {"valid": False, "rcode": rcode, "error": f"DNS RCODE error: {rcode}"}
+    if qdcount == 0 or qdcount > 64 or ancount + nscount + arcount > 4096:
+        return {"valid": False, "error": "Invalid DNS section counts"}
 
-    return {
-        "valid": ancount > 0,
-        "rcode": rcode,
-        "questions": qdcount,
-        "answers": ancount,
-        "authorities": nscount,
-        "additionals": arcount,
-    }
+    try:
+        cursor = 12
+        question_names: List[str] = []
+        for _ in range(qdcount):
+            qname, cursor = _read_dns_name(response, cursor)
+            if cursor + 4 > len(response):
+                raise ValueError("Truncated DNS question")
+            qtype, qclass = struct.unpack("!HH", response[cursor:cursor + 4])
+            if qtype == 0 or qclass == 0:
+                raise ValueError("Invalid DNS question type/class")
+            question_names.append(qname)
+            cursor += 4
+        if expected_question is not None:
+            expected_name = expected_question.strip().rstrip(".").casefold()
+            if qdcount != 1 or question_names[0].casefold() != expected_name:
+                raise ValueError("DNS response question does not match the requested domain")
+
+        address_answers = 0
+        for section_index, count in enumerate((ancount, nscount, arcount)):
+            for _ in range(count):
+                _owner, cursor = _read_dns_name(response, cursor)
+                if cursor + 10 > len(response):
+                    raise ValueError("Truncated DNS resource record")
+                rr_type, rr_class, _ttl, rdlength = struct.unpack("!HHIH", response[cursor:cursor + 10])
+                cursor += 10
+                rdata_start = cursor
+                rdata_end = cursor + rdlength
+                if rdata_end > len(response):
+                    raise ValueError("DNS RDATA extends beyond packet")
+                if section_index == 0 and rr_class == 1:
+                    if rr_type == 1:
+                        if rdlength != 4:
+                            raise ValueError("Invalid A-record length")
+                        address_answers += 1
+                    elif rr_type == 28:
+                        if rdlength != 16:
+                            raise ValueError("Invalid AAAA-record length")
+                        address_answers += 1
+                    elif rr_type in (2, 5, 12):
+                        _, name_end = _read_dns_name(response, rdata_start)
+                        if name_end > rdata_end:
+                            raise ValueError("Compressed DNS name exceeds RDATA")
+                cursor = rdata_end
+
+        if cursor != len(response):
+            raise ValueError("Unexpected trailing bytes after DNS sections")
+        if address_answers == 0:
+            raise ValueError("DNS response contains no valid A/AAAA answer")
+        return {
+            "valid": True,
+            "rcode": rcode,
+            "questions": qdcount,
+            "answers": ancount,
+            "authorities": nscount,
+            "additionals": arcount,
+            "address_answers": address_answers,
+        }
+    except (ValueError, struct.error) as exc:
+        return {"valid": False, "rcode": rcode, "error": str(exc)}
 
 
 def probe_udp_dns(host: str, port: int = 53, domain: str = "example.com", timeout: float = 3.0) -> Dict[str, Any]:
@@ -79,7 +175,7 @@ def probe_udp_dns(host: str, port: int = 53, domain: str = "example.com", timeou
             sock.sendto(query, (host, port))
             response, _ = sock.recvfrom(4096)
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
-        parsed = parse_dns_response_ips(response, txid)
+        parsed = parse_dns_response_ips(response, txid, expected_question=domain)
         return {
             "layer": "DNS_UDP",
             "host": host,
@@ -117,7 +213,7 @@ def probe_tcp_dns(host: str, port: int = 53, domain: str = "example.com", timeou
             length = struct.unpack("!H", length_bytes)[0]
             response = tcp_dns_engine.receive_exact(sock, length)
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
-        parsed = parse_dns_response_ips(response, txid)
+        parsed = parse_dns_response_ips(response, txid, expected_question=domain)
         return {
             "layer": "DNS_TCP",
             "host": host,
@@ -171,7 +267,7 @@ def probe_dot_dns(
                 response = tcp_dns_engine.receive_exact(tls_sock, length)
 
         latency_ms = round((time.perf_counter() - start) * 1000, 2)
-        parsed = parse_dns_response_ips(response, txid)
+        parsed = parse_dns_response_ips(response, txid, expected_question=domain)
         return {
             "layer": "DNS_DOT",
             "host": host,
@@ -374,7 +470,8 @@ def probe_https_egress(
             content_match = len(body) > 0
 
         real_internet = (
-            (tls_verified if parsed_url.scheme == "https" else True)
+            parsed_url.scheme == "https"
+            and tls_verified
             and status_match
             and content_match
             and not is_redirect
@@ -398,6 +495,7 @@ def probe_https_egress(
         return {
             "layer": "HTTPS_EGRESS",
             "url": url,
+            "scheme": parsed_url.scheme,
             "connect_host": target_ip_or_host,
             "sni": target_hostname,
             "status_code": status,

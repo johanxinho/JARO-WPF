@@ -188,7 +188,11 @@ async def async_probe_doq(
             latency_ms = round((time.perf_counter() - start) * 1000, 2)
 
             # RFC 9250 Section 4.2.1: Response Message ID MUST be 0
-            parsed = parse_dns_response_ips(dns_response, expected_txid=0)
+            parsed = parse_dns_response_ips(
+                dns_response,
+                expected_txid=0,
+                expected_question=domain,
+            )
             return {
                 "layer": "DOQ_RFC9250",
                 "host": host,

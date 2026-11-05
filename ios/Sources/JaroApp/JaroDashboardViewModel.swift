@@ -41,7 +41,14 @@ public final class JaroDashboardViewModel: ObservableObject {
         let sharedGroupURL = FileManager.default
             .containerURL(forSecurityApplicationGroupIdentifier: JaroConstants.appGroupIdentifier)?
             .appendingPathComponent("Profiles", isDirectory: true)
-        self.profileManager = JaroProfileManager(secretStore: secretStore, storageDirectoryURL: sharedGroupURL)
+        let privateProfilesURL = FileManager.default
+            .urls(for: .applicationSupportDirectory, in: .userDomainMask)
+            .first?
+            .appendingPathComponent("JARO WPF/Profiles", isDirectory: true)
+        self.profileManager = JaroProfileManager(
+            secretStore: secretStore,
+            storageDirectoryURL: sharedGroupURL ?? privateProfilesURL
+        )
         refreshProfilesAndReadiness()
     }
 
@@ -177,16 +184,19 @@ public final class JaroDashboardViewModel: ObservableObject {
             guard let jsonString = String(data: exportedJSONData, encoding: .utf8) else { return }
 
             let managers = try await NETunnelProviderManager.loadAllFromPreferences()
-            let manager = managers.first ?? NETunnelProviderManager()
+            let manager = managers.first(where: Self.isJaroPacketTunnelManager) ?? NETunnelProviderManager()
 
             let proto = NETunnelProviderProtocol()
             proto.providerBundleIdentifier = JaroConstants.packetTunnelBundleIdentifier
             proto.serverAddress = "\(profile.host):\(profile.port)"
-            proto.providerConfiguration = [
+            var providerConfiguration: [String: Any] = [
                 "jaro_profile_json": jsonString,
                 "allow_expensive_paths": allowExpensivePaths,
-                "user_marked_metered": userMarkedMetered,
             ]
+            if userMarkedMetered {
+                providerConfiguration["user_marked_metered"] = true
+            }
+            proto.providerConfiguration = providerConfiguration
 
             manager.protocolConfiguration = proto
             manager.localizedDescription = "JARO WPF (\(profile.displayName))"
@@ -221,10 +231,10 @@ public final class JaroDashboardViewModel: ObservableObject {
             statusBannerMessage = "Iniciando SSHv2 y proxy local Standalone..."
             try await standaloneSSHEngine.connect(profile: profile, secretStore: secretStore)
             let port = try await standaloneSOCKS5Server.start(bindHost: "127.0.0.1", port: sshSection.localProxyPort)
-            tunnelState = .connectedHandshakeOnly
-            capabilityMatrix.sshAuthenticatedSession = true
+            tunnelState = .unverified
+            capabilityMatrix.sshAuthenticatedSession = standaloneSSHEngine.isSSHAuthenticated
             capabilityMatrix.localProxyListening = true
-            statusBannerMessage = "Proxy Standalone activo en 127.0.0.1:\(port). Configure el proxy Wi-Fi en Ajustes de iOS."
+            statusBannerMessage = "Proxy local activo en 127.0.0.1:\(port). Autenticación SSH y tráfico HTTPS aún no verificados; configure el proxy Wi-Fi y ejecute una prueba autorizada."
             logBuffer.append(level: "INFO", component: "JaroAppStandalone", message: "Standalone proxy active on 127.0.0.1:\(port)")
             recentLogs = logBuffer.snapshot(limit: 40)
         } catch {
@@ -236,38 +246,69 @@ public final class JaroDashboardViewModel: ObservableObject {
     }
 
     public func disconnectActiveTunnel() async {
-        try? await standaloneSOCKS5Server.stop()
-        try? await standaloneSSHEngine.disconnect()
+        var stopError: Error?
+        do {
+            try await standaloneSOCKS5Server.stop()
+            try await standaloneSSHEngine.disconnect()
+        } catch {
+            stopError = error
+        }
         #if canImport(NetworkExtension)
-        if let managers = try? await NETunnelProviderManager.loadAllFromPreferences(),
-           let active = managers.first {
-            active.connection.stopVPNTunnel()
+        do {
+            let managers = try await NETunnelProviderManager.loadAllFromPreferences()
+            if let jaroManager = managers.first(where: Self.isJaroPacketTunnelManager) {
+                jaroManager.connection.stopVPNTunnel()
+            }
+        } catch {
+            stopError = stopError ?? error
         }
         #endif
+        capabilityMatrix = JaroCapabilityMatrix()
+        trafficStats = JaroTrafficStats()
+        if let stopError {
+            tunnelState = .failed
+            statusBannerMessage = "No se pudo confirmar la desconexión completa: \(JaroSecretRedactor.redact(stopError.localizedDescription))"
+        } else {
+            tunnelState = profiles.isEmpty ? .remoteServerRequired : .disconnected
+            statusBannerMessage = "JARO desconectado; capacidades de transporte limpiadas."
+        }
         refreshProfilesAndReadiness()
     }
 
     #if canImport(NetworkExtension)
+    private static func isJaroPacketTunnelManager(_ manager: NETunnelProviderManager) -> Bool {
+        guard let proto = manager.protocolConfiguration as? NETunnelProviderProtocol else { return false }
+        return proto.providerBundleIdentifier == JaroConstants.packetTunnelBundleIdentifier
+    }
+
     public func requestExtensionHTTPSVerification(probeURLString: String = "https://example.com") async {
         guard let managers = try? await NETunnelProviderManager.loadAllFromPreferences(),
-              let manager = managers.first,
+              let manager = managers.first(where: Self.isJaroPacketTunnelManager),
               let session = manager.connection as? NETunnelProviderSession else {
+            statusBannerMessage = "No hay una extensión JARO activa para verificar HTTPS."
             return
         }
         let req = JaroTunnelIPCRequest(command: .verifyHTTPSEgress, probeURLString: probeURLString)
-        guard let payload = try? JSONEncoder().encode(req) else { return }
+        guard let payload = try? JSONEncoder().encode(req) else {
+            statusBannerMessage = "No se pudo codificar la solicitud de diagnóstico HTTPS."
+            return
+        }
 
-        await withCheckedContinuation { (continuation: CheckedContinuation<Void, Never>) in
-            try? session.sendProviderMessage(payload) { [weak self] responseData in
-                if let data = responseData,
-                   let decoded = try? JSONDecoder().decode(JaroTunnelIPCResponse.self, from: data) {
-                    Task { @MainActor in
-                        self?.applyIPCResponse(decoded)
-                    }
+        let responseData = await withCheckedContinuation { (continuation: CheckedContinuation<Data?, Never>) in
+            do {
+                try session.sendProviderMessage(payload) { responseData in
+                    continuation.resume(returning: responseData)
                 }
-                continuation.resume(returning: ())
+            } catch {
+                continuation.resume(returning: nil)
             }
         }
+        guard let responseData,
+              let decoded = try? JSONDecoder().decode(JaroTunnelIPCResponse.self, from: responseData) else {
+            statusBannerMessage = "La extensión JARO no respondió a la verificación HTTPS; no se informa éxito."
+            return
+        }
+        applyIPCResponse(decoded)
     }
 
     private func pollExtensionSnapshot(using manager: NETunnelProviderManager) async {

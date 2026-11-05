@@ -26,3 +26,8 @@ with support for authorized free-access networks.
 - Original source code
 - Secure connections
 - No unauthorized billing circumvention
+
+## Estado de validación
+- Los perfiles remotos deben configurarse con servidores propios/autorizados; el repositorio no incluye servidores ni credenciales de ejemplo.
+- La suite Python se ejecuta con `python3 -m pip install -r requirements-dev.txt` y `python3 -m unittest discover -s tests -v`.
+- Las limitaciones de iOS, firma de Packet Tunnel, artefactos sin firmar y estado de verificación se documentan en [ESTADO_Y_COMPILACION_ES.md](documentation/ESTADO_Y_COMPILACION_ES.md).

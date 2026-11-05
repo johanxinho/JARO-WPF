@@ -200,13 +200,14 @@ class CostManager:
 
         profiles = self._resolve_profiles(active_interfaces)
 
-        # Prioritize FREE if available, otherwise UNKNOWN, otherwise METERED
-        if CostProfile.FREE in profiles:
-            effective = CostProfile.FREE
+        # A probe is not bound to one interface. Use the most restrictive active
+        # profile so a concurrent metered path cannot bypass the user's guard.
+        if CostProfile.METERED in profiles:
+            effective = CostProfile.METERED
         elif CostProfile.UNKNOWN in profiles:
             effective = CostProfile.UNKNOWN
         else:
-            effective = CostProfile.METERED
+            effective = CostProfile.FREE
 
         if effective == CostProfile.METERED and not self.allow_metered:
             return {

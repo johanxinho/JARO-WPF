@@ -49,6 +49,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var capabilities = JaroCapabilityMatrix()
     private var lastErrorMessage: String?
     private var reconnectTask: Task<Void, Never>?
+    private var hasObservedInitialNetworkPath = false
 
     // MARK: - NEPacketTunnelProvider Lifecycle
 
@@ -109,6 +110,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         stateLock.lock()
         self.activeProfile = profile
+        self.hasObservedInitialNetworkPath = false
         stateLock.unlock()
         transitionState(.connecting, error: nil)
 
@@ -192,7 +194,10 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
             capabilities.wireguardHandshake = (wgStats.lastHandshakeEpochSec ?? 0) > 0
             capabilities.wireguardBidirectionalTransfer = wgStats.hasBidirectionalTransfer
             stateLock.unlock()
-            transitionState(.connectedHandshakeOnly, error: nil)
+            transitionState(
+                capabilities.wireguardHandshake ? .connectedHandshakeOnly : .unverified,
+                error: capabilities.wireguardHandshake ? nil : "WireGuard started but no handshake has been observed yet"
+            )
 
         case .sshSocks5:
             guard let sshSection = profile.sshSocks5 else {
@@ -208,10 +213,13 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
             try await setTunnelNetworkSettings(netSettings)
 
             stateLock.lock()
-            capabilities.sshAuthenticatedSession = sshEngine.isSessionActive
+            capabilities.sshAuthenticatedSession = sshEngine.isSSHAuthenticated
             capabilities.localProxyListening = localSOCKS5Server.isListening
             stateLock.unlock()
-            transitionState(.connectedHandshakeOnly, error: nil)
+            transitionState(
+                sshEngine.isSSHAuthenticated ? .connectedHandshakeOnly : .unverified,
+                error: sshEngine.isSSHAuthenticated ? nil : "SSH TCP transport and proxy are ready; SSH authentication is not yet verified"
+            )
         }
     }
 
@@ -222,20 +230,15 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
         let settings = NEPacketTunnelNetworkSettings(tunnelRemoteAddress: profile.host)
         settings.mtu = NSNumber(value: profile.mtu)
 
-        // Isolated loopback-style tunnel interface so global IP routing is NEVER hijacked when includeDefaultRoute == false
-        let ipv4 = NEIPv4Settings(addresses: ["198.18.0.2"], subnetMasks: ["255.255.255.252"])
-        var neRoutes: [NEIPv4Route] = []
-        for cidr in profile.includedRoutes {
-            if (cidr == "0.0.0.0/0" || cidr == "::/0") && !profile.includeDefaultRoute {
-                throw JaroProfileValidationError.unauthorizedGlobalDefaultRoute(cidr)
-            }
-            if cidr == "0.0.0.0/0" && profile.includeDefaultRoute {
-                neRoutes.append(.default())
-            } else if let route = Self.parseIPv4CIDRToNERoute(cidr) {
-                neRoutes.append(route)
-            }
+        // This SSH mode is an HTTP/SOCKS proxy, not an IP packet forwarder. The provider
+        // does not consume packetFlow, so installing any included IP routes would blackhole traffic.
+        guard profile.includedRoutes.isEmpty && !profile.includeDefaultRoute else {
+            throw JaroProfileValidationError.invalidProfileIdentifier(
+                "SSH/SOCKS5 mode cannot install IP routes until packetFlow forwarding is implemented"
+            )
         }
-        ipv4.includedRoutes = neRoutes
+        let ipv4 = NEIPv4Settings(addresses: ["198.18.0.2"], subnetMasks: ["255.255.255.252"])
+        ipv4.includedRoutes = []
         settings.ipv4Settings = ipv4
 
         // Configure NEProxySettings pointing to our dual SOCKS5 + HTTP CONNECT listener on 127.0.0.1:<port>
@@ -270,7 +273,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
         stateLock.lock()
         capabilities.captivePortalDetected = result.captivePortalSuspected
         if profile.tunnelProtocol == .sshSocks5 {
-            capabilities.sshAuthenticatedSession = sshEngine.isSessionActive
+            capabilities.sshAuthenticatedSession = sshEngine.isSSHAuthenticated
             capabilities.localProxyListening = localSOCKS5Server.isListening
             capabilities.sshVerifiedHTTPS = result.httpsVerified
         } else {
@@ -288,15 +291,52 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
     private func startNetworkPathObserver(for profile: JaroPortableProfile) {
         pathCostMonitor.start { [weak self] costSnapshot, pathSatisfied in
             guard let self = self else { return }
+            self.stateLock.lock()
+            let isInitialObservation = !self.hasObservedInitialNetworkPath
+            self.hasObservedInitialNetworkPath = true
+            self.stateLock.unlock()
+
             if !costSnapshot.satisfiesTunnelPolicy {
-                self.transitionState(
-                    .blockedByCostPolicy,
-                    error: "Active path (\(costSnapshot.interfaceKind)) is metered/expensive and blocked by JARO cost policy"
-                )
+                self.blockTunnelForCostPolicy(interfaceKind: costSnapshot.interfaceKind)
                 return
             }
-            guard pathSatisfied else { return }
+
+            guard pathSatisfied else {
+                self.stateLock.lock()
+                self.capabilities = JaroCapabilityMatrix()
+                self.stateLock.unlock()
+                self.transitionState(.reconnecting, error: "Network path is not satisfied; tunnel traffic is unverified")
+                return
+            }
+            // NWPathMonitor reports the current path once after start; only later updates are roaming/recovery events.
+            guard !isInitialObservation else { return }
             self.scheduleControlledRecovery(for: profile)
+        }
+    }
+
+    private func blockTunnelForCostPolicy(interfaceKind: String) {
+        reconnectTask?.cancel()
+        reconnectTask = nil
+        stateLock.lock()
+        let alreadyBlocked = currentState == .blockedByCostPolicy
+        capabilities = JaroCapabilityMatrix()
+        stateLock.unlock()
+        guard !alreadyBlocked else { return }
+
+        transitionState(
+            .blockedByCostPolicy,
+            error: "Active path (\(interfaceKind)) is metered/expensive and blocked by JARO cost policy"
+        )
+        Task { [weak self] in
+            guard let self = self else { return }
+            do { try await self.localSOCKS5Server.stop() }
+            catch { self.logBuffer.append(level: "ERROR", component: "PacketTunnelProvider", message: "Unable to stop local proxy after cost-policy block: \(error.localizedDescription)") }
+            do { try await self.sshEngine.disconnect() }
+            catch { self.logBuffer.append(level: "ERROR", component: "PacketTunnelProvider", message: "Unable to close SSH session after cost-policy block: \(error.localizedDescription)") }
+            do { try await self.wireGuardEngine.stop() }
+            catch { self.logBuffer.append(level: "ERROR", component: "PacketTunnelProvider", message: "Unable to stop WireGuard after cost-policy block: \(error.localizedDescription)") }
+            do { try await self.setTunnelNetworkSettings(nil) }
+            catch { self.logBuffer.append(level: "ERROR", component: "PacketTunnelProvider", message: "Unable to remove tunnel routes after cost-policy block: \(error.localizedDescription)") }
         }
     }
 
@@ -304,29 +344,55 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
         reconnectTask?.cancel()
         reconnectTask = Task { [weak self] in
             guard let self = self else { return }
-            switch profile.tunnelProtocol {
-            case .wireguard:
-                try? await self.wireGuardEngine.handleNetworkChange(profile: profile, secretStore: self.secretStore)
-            case .sshSocks5:
-                if self.sshEngine.isSessionActive && self.localSOCKS5Server.isListening {
-                    return
-                }
-                guard let delay = self.backoff.recordFailureAndNextDelay() else {
-                    self.transitionState(
-                        .circuitBreakerOpen,
-                        error: "Circuit breaker open after repeated SSH reconnect failures"
-                    )
-                    return
-                }
-                self.transitionState(.reconnecting, error: nil)
-                try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
-                guard !Task.isCancelled else { return }
-                do {
+            guard let delay = self.backoff.recordFailureAndNextDelay() else {
+                self.transitionState(
+                    .circuitBreakerOpen,
+                    error: "Circuit breaker open after repeated tunnel recovery failures"
+                )
+                return
+            }
+            self.stateLock.lock()
+            self.capabilities = JaroCapabilityMatrix()
+            self.stateLock.unlock()
+            self.transitionState(.reconnecting, error: nil)
+            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            guard !Task.isCancelled else { return }
+            do {
+                switch profile.tunnelProtocol {
+                case .wireguard:
+                    if self.wireGuardEngine.isRunning {
+                        try await self.wireGuardEngine.handleNetworkChange(profile: profile, secretStore: self.secretStore)
+                    } else {
+                        try await self.wireGuardEngine.start(
+                            profile: profile,
+                            secretStore: self.secretStore,
+                            packetTunnelProvider: self
+                        )
+                    }
+                    let stats = await self.wireGuardEngine.fetchRuntimeStats()
+                    self.stateLock.lock()
+                    self.capabilities.wireguardHandshake = (stats.lastHandshakeEpochSec ?? 0) > 0
+                    self.capabilities.wireguardBidirectionalTransfer = stats.hasBidirectionalTransfer
+                    self.stateLock.unlock()
+                    if (stats.lastHandshakeEpochSec ?? 0) > 0 {
+                        self.backoff.recordSuccess()
+                        self.transitionState(.connectedHandshakeOnly, error: nil)
+                    } else {
+                        self.transitionState(.unverified, error: "WireGuard restarted; no fresh handshake has been observed")
+                    }
+                case .sshSocks5:
+                    try await self.localSOCKS5Server.stop()
+                    try await self.sshEngine.disconnect()
                     try await self.bringUpTunnel(for: profile)
-                    self.backoff.recordSuccess()
-                } catch {
-                    self.transitionState(.failed, error: error.localizedDescription)
+                    if self.sshEngine.isSSHAuthenticated {
+                        self.backoff.recordSuccess()
+                    }
                 }
+            } catch {
+                self.stateLock.lock()
+                self.capabilities = JaroCapabilityMatrix()
+                self.stateLock.unlock()
+                self.transitionState(.failed, error: error.localizedDescription)
             }
         }
     }
@@ -348,7 +414,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
             caps.wireguardBidirectionalTransfer = stats.hasBidirectionalTransfer
         } else {
             stats = localSOCKS5Server.trafficAccumulator.snapshot()
-            caps.sshAuthenticatedSession = sshEngine.isSessionActive
+            caps.sshAuthenticatedSession = sshEngine.isSSHAuthenticated
             caps.localProxyListening = localSOCKS5Server.isListening
         }
         stats.availableExtensionMemoryBytes = Self.queryAvailableExtensionMemoryBytes()

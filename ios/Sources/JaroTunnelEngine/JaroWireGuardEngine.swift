@@ -62,6 +62,14 @@ public final class JaroWireGuardEngine: @unchecked Sendable {
         self.logBuffer = logBuffer
     }
 
+    public var isRunning: Bool {
+        #if canImport(WireGuardKit) && canImport(NetworkExtension)
+        return adapter != nil
+        #else
+        return false
+        #endif
+    }
+
     /// Parses WireGuard UAPI `get=1` key-value lines (`rx_bytes=`, `tx_bytes=`, `last_handshake_time_sec=`)
     /// returned by `WireGuardAdapter.getRuntimeConfiguration`.
     public static func parseUAPIRuntimeConfiguration(_ uapiText: String) -> JaroTrafficStats {

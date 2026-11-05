@@ -402,6 +402,7 @@ def inspect_routing_table(interface_name: Optional[str] = None) -> Dict[str, Any
     default_routes: List[Dict[str, Any]] = []
     interface_routes: List[Dict[str, Any]] = []
     has_global_on_iface = False
+    family_errors: List[str] = []
 
     for family_flag in ([], ["-6"]):
         try:
@@ -411,9 +412,14 @@ def inspect_routing_table(interface_name: Optional[str] = None) -> Dict[str, Any
                 text=True,
                 timeout=3,
             )
-            if res.returncode != 0 or not res.stdout.strip():
+            if res.returncode != 0:
+                family = "IPv6" if family_flag else "IPv4"
+                family_errors.append(f"{family} route query failed: {res.stderr.strip() or res.returncode}")
                 continue
-            entries = json.loads(res.stdout)
+            entries = json.loads(res.stdout or "[]")
+            if not isinstance(entries, list):
+                family_errors.append("Route query returned a non-list JSON value")
+                continue
             for r in entries:
                 dst = str(r.get("dst", ""))
                 dev = str(r.get("dev", ""))
@@ -426,15 +432,15 @@ def inspect_routing_table(interface_name: Optional[str] = None) -> Dict[str, Any
                     interface_routes.append(summary)
                     if is_default:
                         has_global_on_iface = True
-        except (OSError, json.JSONDecodeError, subprocess.TimeoutExpired):
-            continue
+        except (OSError, json.JSONDecodeError, subprocess.TimeoutExpired) as exc:
+            family_errors.append(redact_secrets(str(exc)))
 
     return {
-        "available": True,
+        "available": not family_errors,
         "default_routes": default_routes,
         "interface_routes": interface_routes,
         "has_global_route_on_interface": has_global_on_iface,
-        "error": None,
+        "error": "; ".join(family_errors) if family_errors else None,
     }
 
 
@@ -457,9 +463,15 @@ def verify_route_isolation(
     global_on_tunnel = bool(current_routes.get("has_global_route_on_interface", False))
     tunnel_routes = current_routes.get("interface_routes", [])
 
-    isolated_ok = (default_unchanged and not global_on_tunnel) or allow_global_routes
+    snapshots_available = baseline_routes.get("available") is True and current_routes.get("available") is True
+    isolated_ok = snapshots_available and ((default_unchanged and not global_on_tunnel) or allow_global_routes)
     error = None
-    if not isolated_ok:
+    if not snapshots_available:
+        error = (
+            "Cannot verify route isolation: baseline/current IPv4+IPv6 route snapshot is unavailable "
+            f"(baseline={baseline_routes.get('error')}, current={current_routes.get('error')})"
+        )
+    elif not isolated_ok:
         error = (
             f"Route isolation violation on '{tunnel_interface}': "
             f"default_unchanged={default_unchanged}, global_on_tunnel={global_on_tunnel}"
@@ -470,6 +482,7 @@ def verify_route_isolation(
         "default_route_unchanged": default_unchanged,
         "has_global_route_on_tunnel": global_on_tunnel,
         "tunnel_routes": tunnel_routes,
+        "route_snapshots_available": snapshots_available,
         "error": error,
     }
 
@@ -601,7 +614,9 @@ class WireGuardTunnelEngine:
             wg_query_note = "System 'wg' binary is not installed"
 
         route_info = inspect_routing_table(self.interface_name)
-        routes_safe = (not route_info["has_global_route_on_interface"]) or self.allow_global_routes
+        routes_safe = bool(route_info.get("available")) and (
+            (not route_info["has_global_route_on_interface"]) or self.allow_global_routes
+        )
 
         https_egress_verified = False
         egress_latency_ms: Optional[float] = None
@@ -677,13 +692,14 @@ class WireGuardTunnelEngine:
             "tunnel_verified": tunnel_verified,
             "peers": wg_peers,
             "egress_error": egress_error,
-            "note": wg_query_note or egress_error,
+            "note": wg_query_note or egress_error or route_info.get("error"),
         }
 
     def activate(
         self,
         *,
         authorize_interface_changes: Optional[bool] = None,
+        authorize_route_changes: Optional[bool] = None,
         allow_privileged_commands: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Brings up an authorized WireGuard profile ONLY when explicitly authorized by policy."""
@@ -712,8 +728,8 @@ class WireGuardTunnelEngine:
             ),
             authorize_route_changes=(
                 self.privilege_gate.authorize_route_changes
-                if authorize_interface_changes is None
-                else authorize_interface_changes
+                if authorize_route_changes is None
+                else authorize_route_changes
             ),
             allow_global_routes=self.allow_global_routes,
         )
@@ -726,6 +742,14 @@ class WireGuardTunnelEngine:
                 "error": mut_check["reason"],
             }
 
+        route_check = eff_gate.check_route_mutation(modifies_global_default=self.allow_global_routes)
+        if not route_check["allowed"]:
+            return {
+                "activated": False,
+                "authorization_required": True,
+                "error": route_check["reason"],
+            }
+
         tools = detect_wireguard_tooling()
         if not tools["wg_quick_binary"]:
             return {
@@ -735,6 +759,14 @@ class WireGuardTunnelEngine:
             }
 
         baseline_routes = inspect_routing_table(self.interface_name)
+        if not baseline_routes.get("available"):
+            return {
+                "activated": False,
+                "error": (
+                    "Cannot safely activate WireGuard without complete IPv4/IPv6 route snapshot: "
+                    f"{baseline_routes.get('error')}"
+                ),
+            }
         cmd = [tools["wg_quick_binary"], "up", str(self.config_path)]
         if os.name == "posix" and os.geteuid() != 0:
             sudo_bin = shutil.which("sudo")
@@ -760,6 +792,7 @@ class WireGuardTunnelEngine:
             if not route_audit["routes_isolated_and_safe"]:
                 self.deactivate(
                     authorize_interface_changes=True,
+                    authorize_route_changes=eff_gate.authorize_route_changes,
                     allow_privileged_commands=eff_gate.allow_privileged_commands,
                 )
                 return {
@@ -782,6 +815,7 @@ class WireGuardTunnelEngine:
         self,
         *,
         authorize_interface_changes: Optional[bool] = None,
+        authorize_route_changes: Optional[bool] = None,
         allow_privileged_commands: Optional[bool] = None,
     ) -> Dict[str, Any]:
         """Tears down the WireGuard interface cleanly ONLY when authorized."""
@@ -799,7 +833,11 @@ class WireGuardTunnelEngine:
                 if authorize_interface_changes is None
                 else authorize_interface_changes
             ),
-            authorize_route_changes=True,
+            authorize_route_changes=(
+                self.privilege_gate.authorize_route_changes
+                if authorize_route_changes is None
+                else authorize_route_changes
+            ),
             allow_global_routes=self.allow_global_routes,
         )
         mut_check = eff_gate.check_interface_mutation(f"deactivate WireGuard interface {self.interface_name}")
@@ -808,6 +846,13 @@ class WireGuardTunnelEngine:
                 "deactivated": False,
                 "authorization_required": True,
                 "error": mut_check["reason"],
+            }
+        route_check = eff_gate.check_route_mutation(modifies_global_default=self.allow_global_routes)
+        if not route_check["allowed"]:
+            return {
+                "deactivated": False,
+                "authorization_required": True,
+                "error": route_check["reason"],
             }
 
         tools = detect_wireguard_tooling()

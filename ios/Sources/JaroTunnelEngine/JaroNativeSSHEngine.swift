@@ -129,17 +129,31 @@ public final class JaroNativeSSHEngine: @unchecked Sendable {
     private let logBuffer: JaroRingLogBuffer
     private var eventLoopGroup: EventLoopGroup?
     private var sessionChannel: Channel?
+    private var authenticatedSshSession = false
 
     public init(logBuffer: JaroRingLogBuffer) {
         self.logBuffer = logBuffer
     }
 
-    /// True ONLY when the underlying TCP/NWConnection channel is genuinely open and active (no cached flags).
+    /// True when the underlying SSH transport channel is genuinely open and active; this alone does not prove auth.
     public var isSessionActive: Bool {
         lock.lock()
         let ch = sessionChannel
         lock.unlock()
         return ch?.isActive ?? false
+    }
+
+    /// True only after the SSH server accepted authentication and a direct-tcpip channel opened successfully.
+    public var isSSHAuthenticated: Bool {
+        lock.lock()
+        defer { lock.unlock() }
+        return authenticatedSshSession && (sessionChannel?.isActive ?? false)
+    }
+
+    private func markSSHAuthenticated() {
+        lock.lock()
+        authenticatedSshSession = true
+        lock.unlock()
     }
 
     public func connect(
@@ -207,11 +221,12 @@ public final class JaroNativeSSHEngine: @unchecked Sendable {
             lock.lock()
             self.eventLoopGroup = group
             self.sessionChannel = channel
+            self.authenticatedSshSession = false
             lock.unlock()
             logBuffer.append(
                 level: "INFO",
                 component: "JaroNativeSSHEngine",
-                message: "Connected SSHv2 transport to \(profile.host):\(profile.port) as \(sshSection.username)"
+                message: "SSH TCP transport opened to \(profile.host):\(profile.port); authentication remains unverified until a channel is accepted"
             )
         } catch {
             try? await group.shutdownGracefully()
@@ -254,6 +269,9 @@ public final class JaroNativeSSHEngine: @unchecked Sendable {
                 return childChannelInitializer(childChannel)
             }
             return promise.futureResult
+        }.map { [weak self] childChannel in
+            self?.markSSHAuthenticated()
+            return childChannel
         }
     }
 
@@ -263,6 +281,7 @@ public final class JaroNativeSSHEngine: @unchecked Sendable {
         let grp = eventLoopGroup
         sessionChannel = nil
         eventLoopGroup = nil
+        authenticatedSshSession = false
         lock.unlock()
 
         if let ch = ch, ch.isActive {

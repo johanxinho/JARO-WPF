@@ -218,12 +218,12 @@ private struct SSHProfileValues {
 private struct SSHProfileSetupSheet: View {
     let onSave: (SSHProfileValues) -> Void
     @Environment(\.dismiss) private var dismiss
-    @State private var profileId = "ssh-pc-casa"
-    @State private var displayName = "Mi PC Linux"
-    @State private var host = "192.168.1.242"
+    @State private var profileId = ""
+    @State private var displayName = ""
+    @State private var host = ""
     @State private var port = "22"
-    @State private var username = "johanxinho"
-    @State private var fingerprint = "SHA256:nnWv8FwZTu1qXxwQ9XBJsnAkLPIQDmM2EqxrhyHf1JM"
+    @State private var username = ""
+    @State private var fingerprint = ""
     @State private var privateSeedBase64 = ""
     @State private var publicKeyLine = ""
     @State private var generated = false

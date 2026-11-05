@@ -31,11 +31,16 @@ class TestConnectivityProberBehavior(unittest.TestCase):
     """Verifies real socket/HTTP/TLS behavior and strict separation of connectivity states."""
 
     def test_dns_response_validation(self) -> None:
-        txid, _ = create_dns_query("example.com")
-        valid_pkt = struct.pack("!HHHHHH", txid, 0x8180, 1, 1, 0, 0)
+        txid, query = create_dns_query("example.com")
+        question = query[12:]
+        answer = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + bytes((93, 184, 216, 34))
+        valid_pkt = struct.pack("!HHHHHH", txid, 0x8180, 1, 1, 0, 0) + question + answer
         parsed = parse_dns_response_ips(valid_pkt, txid)
         self.assertTrue(parsed["valid"])
         self.assertEqual(parsed["answers"], 1)
+
+        header_only = struct.pack("!HHHHHH", txid, 0x8180, 1, 1, 0, 0)
+        self.assertFalse(parse_dns_response_ips(header_only, txid)["valid"])
 
         bad_txid = parse_dns_response_ips(valid_pkt, (txid + 1) % 65536)
         self.assertFalse(bad_txid["valid"])
@@ -413,7 +418,8 @@ class TestDoQProtocolRFC9250Audit(unittest.IsolatedAsyncioTestCase):
     async def test_doq_rfc9250_valid_query_and_response(self) -> None:
         proto = self._make_protocol()
         _, raw_query = create_dns_query("example.com")
-        fake_dns_resp = struct.pack("!HHHHHH", 0x0000, 0x8180, 1, 1, 0, 0) + raw_query[12:]
+        answer = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + bytes((93, 184, 216, 34))
+        fake_dns_resp = struct.pack("!HHHHHH", 0x0000, 0x8180, 1, 1, 0, 0) + raw_query[12:] + answer
         framed_resp = struct.pack("!H", len(fake_dns_resp)) + fake_dns_resp
 
         asyncio.get_running_loop().call_soon(
@@ -432,7 +438,8 @@ class TestDoQProtocolRFC9250Audit(unittest.IsolatedAsyncioTestCase):
     async def test_doq_rejects_trailing_bytes_and_truncated_payload(self) -> None:
         proto = self._make_protocol()
         _, raw_query = create_dns_query("example.com")
-        fake_dns_resp = struct.pack("!HHHHHH", 0x0000, 0x8180, 1, 1, 0, 0) + raw_query[12:]
+        answer = b"\xc0\x0c" + struct.pack("!HHIH", 1, 1, 60, 4) + bytes((93, 184, 216, 34))
+        fake_dns_resp = struct.pack("!HHHHHH", 0x0000, 0x8180, 1, 1, 0, 0) + raw_query[12:] + answer
         # Add 4 illegal trailing bytes after the length-prefixed DNS message
         framed_with_trailing = struct.pack("!H", len(fake_dns_resp)) + fake_dns_resp + b"JUNK"
 

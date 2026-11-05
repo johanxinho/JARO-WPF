@@ -68,6 +68,7 @@ from core.security.secret_guard import (
     SecretSecurityError,
     audit_json_no_plaintext_secrets,
     audit_sensitive_file,
+    audit_trusted_file_integrity,
     compute_ssh_pubkey_fingerprint,
     inspect_ssh_identity_file,
     protect_sensitive_file,
@@ -130,6 +131,27 @@ class TestPhase5SecurityControls(unittest.TestCase):
             bad_key.write_text("plain text not a key\n", encoding="utf-8")
             os.chmod(bad_key, 0o600)
             self.assertFalse(inspect_ssh_identity_file(bad_key)["valid"])
+
+    def test_sensitive_key_symlinks_and_writable_known_hosts_are_rejected(self) -> None:
+        with tempfile.TemporaryDirectory() as tmp:
+            directory = Path(tmp)
+            os.chmod(directory, 0o700)
+            private_key = directory / "private_key"
+            private_key.write_text("private key placeholder", encoding="utf-8")
+            os.chmod(private_key, 0o600)
+            key_link = directory / "key_link"
+            key_link.symlink_to(private_key)
+            self.assertFalse(protect_sensitive_file(key_link, 0o600)["protected"])
+            self.assertFalse(audit_sensitive_file(key_link)["valid"])
+
+            known_hosts = directory / "known_hosts"
+            known_hosts.write_text(
+                f"127.0.0.1 ssh-ed25519 {_sample_ed25519_pubkey_b64()}\n",
+                encoding="utf-8",
+            )
+            os.chmod(known_hosts, 0o666)
+            self.assertFalse(audit_trusted_file_integrity(known_hosts)["valid"])
+            self.assertFalse(verify_known_hosts_entry(known_hosts, "127.0.0.1")["valid"])
 
     def test_audit_json_rejects_plaintext_passwords_and_inline_keys(self) -> None:
         safe_doc = {
@@ -335,13 +357,18 @@ class TestPhase5SshAndWireGuardEngines(unittest.TestCase):
         self.assertTrue(validate_wireguard_config_text(dns_conf, allow_dns_override=True)["valid"])
 
         # 3. Route isolation detector catches default-route hijack
-        baseline = {"default_routes": [{"dst": "default", "dev": "wlp2s0", "gateway": "192.168.1.1"}]}
+        baseline = {
+            "available": True,
+            "default_routes": [{"dst": "default", "dev": "wlp2s0", "gateway": "192.168.1.1"}],
+        }
         safe_curr = {
+            "available": True,
             "default_routes": [{"dst": "default", "dev": "wlp2s0", "gateway": "192.168.1.1"}],
             "interface_routes": [{"dst": "10.199.77.0/30", "dev": "wg_jaro0", "gateway": None}],
             "has_global_route_on_interface": False,
         }
         hijacked_curr = {
+            "available": True,
             "default_routes": [{"dst": "default", "dev": "wg_jaro0", "gateway": None}],
             "interface_routes": [{"dst": "default", "dev": "wg_jaro0", "gateway": None}],
             "has_global_route_on_interface": True,
@@ -509,6 +536,9 @@ class TestPhase5DiagnosticTransportAndIosContracts(unittest.TestCase):
             )
             self.assertFalse(ssh_contract["device_verified"])
             self.assertEqual(ssh_contract["verification_status"], IOS_VERIFICATION_STATUS)
+
+        models_source = (Path(__file__).resolve().parents[1] / "ios/Sources/JaroCore/JaroModels.swift").read_text(encoding="utf-8")
+        self.assertIn("userMarkedMetered == true || isExpensive || isConstrained", models_source)
 
 
 class TestPhase5LocalTunnelLabs(unittest.TestCase):

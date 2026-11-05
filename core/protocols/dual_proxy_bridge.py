@@ -11,6 +11,7 @@ Mirrors the exact state machine implemented in Swift (`ios/Sources/JaroTunnelEng
   redacted diagnostic events.
 """
 import http.client
+import ipaddress
 import socket
 import ssl
 import struct
@@ -150,6 +151,7 @@ class JaroDualProxyBridge:
         self._socks5_count = 0
         self._http_connect_count = 0
         self._active_streams = 0
+        self._active_sockets: set[socket.socket] = set()
         self._logs: List[str] = []
 
     def _log(self, message: str) -> None:
@@ -161,7 +163,8 @@ class JaroDualProxyBridge:
     def start(self) -> int:
         self.stop()
         self._stop_ev.clear()
-        srv = socket.socket(socket.AF_INET, socket.SOCK_STREAM)
+        family = socket.AF_INET6 if ":" in self.bind_host else socket.AF_INET
+        srv = socket.socket(family, socket.SOCK_STREAM)
         srv.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         srv.bind((self.bind_host, self.bind_port))
         srv.listen(16)
@@ -181,6 +184,17 @@ class JaroDualProxyBridge:
             except OSError:
                 pass
             self._srv_sock = None
+        with self._lock:
+            active_sockets = list(self._active_sockets)
+        for active_sock in active_sockets:
+            try:
+                active_sock.shutdown(socket.SHUT_RDWR)
+            except OSError:
+                pass
+            try:
+                active_sock.close()
+            except OSError:
+                pass
         if self._accept_thread is not None:
             self._accept_thread.join(timeout=2.0)
             self._accept_thread = None
@@ -206,6 +220,8 @@ class JaroDualProxyBridge:
                 continue
             except OSError:
                 break
+            with self._lock:
+                self._active_sockets.add(client_sock)
             th = threading.Thread(target=self._handle_client, args=(client_sock,), daemon=True)
             th.start()
 
@@ -235,6 +251,9 @@ class JaroDualProxyBridge:
                 _recv_exact(up, ln + 2)
             elif atyp == 0x04:
                 _recv_exact(up, 18)
+            else:
+                up.close()
+                raise DualProxyError(f"Unknown upstream SOCKS5 address type {atyp:#x}")
             return up
 
         resolved = "127.0.0.1" if dst_host == "localhost" else dst_host
@@ -267,8 +286,8 @@ class JaroDualProxyBridge:
                     req_hdr = _recv_exact(client_sock, 4)
                 except DualProxyError:
                     return
-                _v, cmd, _rsv, atyp = struct.unpack("!BBBB", req_hdr)
-                if cmd != 0x01:
+                req_ver, cmd, rsv, atyp = struct.unpack("!BBBB", req_hdr)
+                if req_ver != 0x05 or rsv != 0x00 or cmd != 0x01:
                     client_sock.sendall(b"\x05\x07\x00\x01\x00\x00\x00\x00\x00\x00")
                     return
                 if atyp == 0x01:
@@ -284,7 +303,15 @@ class JaroDualProxyBridge:
                 dst_port = struct.unpack("!H", _recv_exact(client_sock, 2))[0]
 
                 upstream = self._open_upstream(dst_host, dst_port)
-                client_sock.sendall(b"\x05\x00\x00\x01\x7f\x00\x00\x01" + struct.pack("!H", self.bind_port))
+                with self._lock:
+                    self._active_sockets.add(upstream)
+                bound_host, bound_port = upstream.getsockname()[:2]
+                try:
+                    bound_ip = ipaddress.ip_address(bound_host)
+                except ValueError:
+                    bound_ip = ipaddress.ip_address("0.0.0.0")
+                bound_addr = (b"\x01" if bound_ip.version == 4 else b"\x04") + bound_ip.packed
+                client_sock.sendall(b"\x05\x00\x00" + bound_addr + struct.pack("!H", bound_port))
             elif first[0] in (ord("C"), ord("c")):
                 # RFC 9110 HTTP CONNECT path (mirrors iOS NEProxySettings.httpsServer!)
                 with self._lock:
@@ -297,23 +324,37 @@ class JaroDualProxyBridge:
                     hdr.extend(chunk)
                     if len(hdr) > 8192:
                         return
-                req_line = bytes(hdr).split(b"\r\n", 1)[0].decode("ascii", errors="replace")
+                request_bytes = bytes(hdr)
+                header_bytes, extra_bytes = request_bytes.split(b"\r\n\r\n", 1)
+                req_line = header_bytes.split(b"\r\n", 1)[0].decode("ascii", errors="replace")
                 tokens = req_line.split()
-                if len(tokens) < 2 or tokens[0].upper() != "CONNECT":
+                if len(tokens) != 3 or tokens[0].upper() != "CONNECT" or not tokens[2].startswith("HTTP/"):
                     client_sock.sendall(b"HTTP/1.1 405 Method Not Allowed\r\n\r\n")
                     return
                 authority = tokens[1]
                 if authority.startswith("["):
+                    if "]:" not in authority:
+                        raise DualProxyError("Malformed bracketed IPv6 CONNECT authority")
                     dst_host, port_s = authority[1:].rsplit("]:", 1)
                 else:
                     dst_host, port_s = authority.rsplit(":", 1)
                 dst_port = int(port_s)
+                if not dst_host or not (1 <= dst_port <= 65535):
+                    raise DualProxyError("Invalid HTTP CONNECT target host or port")
                 upstream = self._open_upstream(dst_host, dst_port)
+                with self._lock:
+                    self._active_sockets.add(upstream)
                 client_sock.sendall(b"HTTP/1.1 200 Connection Established\r\n\r\n")
+                if extra_bytes:
+                    upstream.sendall(extra_bytes)
             else:
                 self._log(f"Rejected unknown proxy framing byte 0x{first[0]:02x}")
                 return
 
+            # Negotiation has bounded timeouts; application streams must not inherit
+            # that connect timeout or valid long-lived/idle tunnels get truncated.
+            client_sock.settimeout(None)
+            upstream.settimeout(None)
             self._pipe_bidirectional(client_sock, upstream)
         except Exception as exc:
             self._log(f"Stream error: {exc.__class__.__name__}: {exc}")
@@ -328,6 +369,9 @@ class JaroDualProxyBridge:
             except OSError:
                 pass
             with self._lock:
+                self._active_sockets.discard(client_sock)
+                if upstream is not None:
+                    self._active_sockets.discard(upstream)
                 self._active_streams = max(0, self._active_streams - 1)
 
     def _pipe_bidirectional(self, client_sock: socket.socket, upstream_sock: socket.socket) -> None:
@@ -355,8 +399,8 @@ class JaroDualProxyBridge:
         t_dn = threading.Thread(target=forward, args=(upstream_sock, client_sock, False), daemon=True)
         t_up.start()
         t_dn.start()
-        t_up.join(timeout=5.0)
-        t_dn.join(timeout=5.0)
+        t_up.join()
+        t_dn.join()
 
     def __enter__(self) -> "JaroDualProxyBridge":
         self.start()

@@ -13,10 +13,13 @@ import binascii
 from dataclasses import dataclass
 import hashlib
 import hmac
+import getpass
 import os
 from pathlib import Path
 import re
+import shutil
 import stat
+import subprocess
 from typing import Any, Dict, List, Optional, Sequence
 
 ALLOWED_SSH_HOSTKEY_TYPES = frozenset({
@@ -93,6 +96,61 @@ class PrivilegePolicyError(Exception):
     """Raised when an operation attempts privileged or interface-mutating actions without authorization."""
 
 
+def _audit_windows_acl(path: Path) -> Dict[str, Any]:
+    """Fail-closed Windows ACL check; never treat the NTFS default ACL as owner-only."""
+    icacls = shutil.which("icacls")
+    if not icacls:
+        return {"valid": False, "error": "icacls is unavailable; Windows ACL could not be verified"}
+    whoami = shutil.which("whoami")
+    if not whoami:
+        return {"valid": False, "error": "whoami is unavailable; current Windows principal could not be verified"}
+    try:
+        result = subprocess.run([icacls, str(path)], capture_output=True, text=True, timeout=5)
+        current_user = subprocess.run([whoami], capture_output=True, text=True, timeout=5)
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        return {"valid": False, "error": f"Unable to inspect Windows ACL: {redact_secrets(str(exc))}"}
+    if result.returncode != 0 or not result.stdout.strip():
+        return {"valid": False, "error": redact_secrets(result.stderr.strip() or "icacls returned no ACL data")}
+    if current_user.returncode != 0 or not current_user.stdout.strip():
+        return {"valid": False, "error": "Unable to determine current Windows principal"}
+
+    account = current_user.stdout.strip().casefold()
+    allowed = {
+        account,
+        account.rsplit("\\", 1)[-1],
+        "system",
+        "nt authority\\system",
+        "administrators",
+        "builtin\\administrators",
+    }
+    resolved_path = str(path.resolve()).casefold()
+    entries = []
+    for raw_line in result.stdout.splitlines():
+        line = raw_line.strip()
+        if not line or line.casefold().startswith("successfully processed"):
+            continue
+        if line.casefold().startswith(resolved_path):
+            line = line[len(resolved_path):].strip()
+        if not line:
+            continue
+        if ":" not in line:
+            return {"valid": False, "error": "Unable to parse an icacls ACL entry"}
+        principal, permissions = line.split(":", 1)
+        principal = principal.strip().casefold()
+        # Deny-only ACEs do not grant access. Mandatory labels are integrity policy, not user ACL grants.
+        if "deny" in permissions.casefold() or principal.startswith("mandatory label\\"):
+            continue
+        entries.append(principal)
+        if principal not in allowed:
+            return {
+                "valid": False,
+                "error": f"Untrusted Windows ACL principal on sensitive path: {principal}",
+            }
+    if account not in entries and account.rsplit("\\", 1)[-1] not in entries:
+        return {"valid": False, "error": "Current Windows account has no explicit ACL entry"}
+    return {"valid": True, "error": None}
+
+
 def redact_secrets(text: Optional[str]) -> str:
     """Scrubs private keys, WireGuard keys, passwords, and tokens from any log or error string."""
     if not text:
@@ -107,7 +165,7 @@ def redact_secrets(text: Optional[str]) -> str:
 def protect_sensitive_file(file_path: str | Path, mode: int = 0o600) -> Dict[str, Any]:
     """Applies strict owner-only POSIX permissions (default 0o600) to a sensitive file."""
     path = Path(file_path)
-    if not path.is_file():
+    if path.is_symlink() or not path.is_file():
         return {"protected": False, "error": f"Sensitive file does not exist: {path}"}
     if mode & 0o077:
         return {"protected": False, "error": f"Refusing insecure target mode {oct(mode)}; group/other bits must be 0"}
@@ -116,7 +174,32 @@ def protect_sensitive_file(file_path: str | Path, mode: int = 0o600) -> Dict[str
             os.chmod(path, mode)
             actual = stat.S_IMODE(path.stat().st_mode)
             return {"protected": actual == mode, "mode": oct(actual), "error": None}
-        return {"protected": True, "mode": "nt_acl_default", "error": None}
+        if os.name == "nt":
+            domain = os.environ.get("USERDOMAIN", "")
+            username = getpass.getuser()
+            principal = f"{domain}\\{username}" if domain else username
+            icacls = shutil.which("icacls")
+            if not icacls:
+                return {"protected": False, "error": "icacls is unavailable; refusing to claim ACL protection"}
+            result = subprocess.run(
+                [
+                    icacls, str(path), "/inheritance:r", "/remove:g",
+                    "*S-1-1-0", "*S-1-5-32-545", "*S-1-5-11", "/grant:r",
+                    f"{principal}:(F)", "*S-1-5-18:(F)", "*S-1-5-32-544:(F)",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
+            )
+            if result.returncode != 0:
+                return {"protected": False, "error": redact_secrets(result.stderr.strip() or "icacls ACL update failed")}
+            audit = _audit_windows_acl(path)
+            return {
+                "protected": bool(audit["valid"]),
+                "mode": "ntfs_acl_audited" if audit["valid"] else None,
+                "error": audit["error"],
+            }
+        return {"protected": False, "error": f"Unsupported platform for sensitive-file ACL protection: {os.name}"}
     except OSError as exc:
         return {"protected": False, "error": redact_secrets(str(exc))}
 
@@ -152,7 +235,39 @@ def audit_sensitive_file(
             }
         return {"valid": True, "mode": oct(mode), "error": None}
 
-    return {"valid": True, "mode": "non_posix", "error": None}
+    if os.name == "nt":
+        file_acl = _audit_windows_acl(path)
+        parent_acl = _audit_windows_acl(path.parent)
+        valid = bool(file_acl["valid"] and parent_acl["valid"])
+        return {
+            "valid": valid,
+            "mode": "ntfs_acl_audited" if valid else "ntfs_acl_unverified",
+            "error": file_acl.get("error") or parent_acl.get("error"),
+        }
+    return {"valid": False, "mode": "unsupported", "error": f"Unsupported platform for ACL audit: {os.name}"}
+
+
+def audit_trusted_file_integrity(file_path: str | Path) -> Dict[str, Any]:
+    """Check that a public trust file cannot be replaced by a group/other writer."""
+    path = Path(file_path)
+    if not path.is_file() or path.is_symlink():
+        return {"valid": False, "error": "Trust file must be a regular non-symlink file"}
+    if os.name == "posix":
+        file_mode = stat.S_IMODE(path.stat().st_mode)
+        parent_mode = stat.S_IMODE(path.parent.stat().st_mode)
+        if file_mode & 0o022:
+            return {"valid": False, "error": f"Trust file is group/other writable ({oct(file_mode)})"}
+        if parent_mode & 0o022 and not (parent_mode & stat.S_ISVTX):
+            return {"valid": False, "error": f"Trust file parent is group/other writable ({oct(parent_mode)})"}
+        return {"valid": True, "error": None}
+    if os.name == "nt":
+        file_acl = _audit_windows_acl(path)
+        parent_acl = _audit_windows_acl(path.parent)
+        return {
+            "valid": bool(file_acl["valid"] and parent_acl["valid"]),
+            "error": file_acl.get("error") or parent_acl.get("error"),
+        }
+    return {"valid": False, "error": f"Unsupported platform for trust-file integrity audit: {os.name}"}
 
 
 def audit_json_no_plaintext_secrets(data: Any, path_prefix: str = "$") -> Dict[str, Any]:
@@ -266,12 +381,20 @@ def verify_known_hosts_entry(
     - Rejects `@revoked` entries and deprecated `ssh-dss` keys.
     """
     path = Path(known_hosts_file)
-    if not path.is_file():
+    if not path.is_file() or path.is_symlink():
         return {
             "valid": False,
             "matched": False,
             "fingerprints": [],
-            "error": f"known_hosts file does not exist: {path}",
+            "error": f"known_hosts must be a regular non-symlink file: {path}",
+        }
+    integrity = audit_trusted_file_integrity(path)
+    if not integrity["valid"]:
+        return {
+            "valid": False,
+            "matched": False,
+            "fingerprints": [],
+            "error": integrity["error"],
         }
 
     clean_host = host.strip()

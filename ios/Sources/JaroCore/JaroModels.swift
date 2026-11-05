@@ -53,7 +53,7 @@ public struct JaroPathCostSnapshot: Codable, Equatable, Sendable {
         self.isExpensive = isExpensive
         self.isConstrained = isConstrained
         self.userMarkedMetered = userMarkedMetered
-        let effectiveMetered = userMarkedMetered ?? (isExpensive || isConstrained)
+        let effectiveMetered = userMarkedMetered == true || isExpensive || isConstrained
         self.satisfiesTunnelPolicy = allowExpensivePaths || !effectiveMetered
     }
 }

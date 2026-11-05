@@ -24,6 +24,7 @@ import getpass
 import os
 from pathlib import Path
 import shutil
+import secrets
 import signal
 import socket
 import ssl
@@ -166,7 +167,11 @@ class LocalOpenSshLoopbackLab:
         if os.name != "posix":
             return None
         uid = os.geteuid()
-        candidate = Path.home().resolve()
+        try:
+            import pwd
+            candidate = Path(pwd.getpwuid(uid).pw_dir).resolve()
+        except (ImportError, KeyError, OSError):
+            candidate = Path.home().resolve()
         if not candidate.is_dir():
             return None
         chain = [candidate, *candidate.parents]
@@ -288,7 +293,11 @@ class LocalOpenSshLoopbackLab:
                 },
             }
 
-        current_user = getpass.getuser()
+        try:
+            import pwd
+            current_user = pwd.getpwuid(os.geteuid()).pw_name
+        except (ImportError, KeyError, OSError):
+            current_user = getpass.getuser()
         strict_parent = self._select_strictmodes_parent()
         strict_modes_val = "yes" if strict_parent is not None else "no"
         with tempfile.TemporaryDirectory(prefix=".jaro_sshd_lab_", dir=strict_parent) as tmp:
@@ -341,6 +350,7 @@ class LocalOpenSshLoopbackLab:
                 f"PasswordAuthentication no\n"
                 f"KbdInteractiveAuthentication no\n"
                 f"PubkeyAuthentication yes\n"
+                f"PermitRootLogin {'yes' if current_user == 'root' else 'no'}\n"
                 f"AllowUsers {current_user}\n"
                 f"AllowTcpForwarding yes\n"
                 f"X11Forwarding no\n"
@@ -612,6 +622,12 @@ class LocalWireGuardLoopbackLab:
 
     def __init__(self, server_manager: Optional[ServerManager] = None) -> None:
         self.server_manager = server_manager or ServerManager()
+        # Linux interface names are limited to 15 bytes. Per-run names avoid
+        # collisions with resources that belong to the user or another process.
+        suffix = secrets.token_hex(4)
+        self.IFACE_A = f"ja{suffix}"
+        self.IFACE_B = f"jb{suffix}"
+        self.PEER_NETNS = f"jaro{suffix}"
 
     def planned_privileged_operations(self) -> List[str]:
         """Returns the exact isolated commands required so the user can review before authorizing."""
@@ -624,7 +640,7 @@ class LocalWireGuardLoopbackLab:
             f"ip link set {self.IFACE_B} netns {self.PEER_NETNS}",
             f"ip addr add {self.ADDR_A} dev {self.IFACE_A} && ip link set {self.IFACE_A} up",
             f"ip -n {self.PEER_NETNS} link set lo up && ip -n {self.PEER_NETNS} addr add {self.ADDR_B} dev {self.IFACE_B} && ip -n {self.PEER_NETNS} link set {self.IFACE_B} up",
-            f"Cleanup (guaranteed): ip link del {self.IFACE_A}; ip netns del {self.PEER_NETNS}",
+            f"Cleanup only for resources created by this run: ip link del {self.IFACE_A}; ip netns del {self.PEER_NETNS}",
         ]
 
     @staticmethod
@@ -775,12 +791,11 @@ class LocalWireGuardLoopbackLab:
                 encoding="utf-8",
             )
 
+            created_iface_a = False
+            created_iface_b = False
+            created_peer_netns = False
+            iface_b_moved_to_netns = False
             try:
-                # Ensure no stale interfaces/netns from any interrupted run
-                self._run_priv([ip_bin, "link", "del", self.IFACE_A], use_sudo=use_sudo)
-                self._run_priv([ip_bin, "link", "del", self.IFACE_B], use_sudo=use_sudo)
-                self._run_priv([ip_bin, "netns", "del", self.PEER_NETNS], use_sudo=use_sudo)
-
                 t0 = time.perf_counter()
                 setup_steps = [
                     [ip_bin, "link", "add", "dev", self.IFACE_A, "type", "wireguard"],
@@ -802,6 +817,15 @@ class LocalWireGuardLoopbackLab:
                             f"WireGuard setup command failed ({step_cmd[0]} {step_cmd[1]}): "
                             f"{redact_secrets(r.stderr.strip())}"
                         )
+                    if step_cmd[1:3] == ["link", "add"] and step_cmd[-1] == "wireguard":
+                        if step_cmd[4] == self.IFACE_A:
+                            created_iface_a = True
+                        elif step_cmd[4] == self.IFACE_B:
+                            created_iface_b = True
+                    elif step_cmd[1:3] == ["netns", "add"]:
+                        created_peer_netns = True
+                    elif step_cmd[1:3] == ["link", "set"] and self.IFACE_B in step_cmd and "netns" in step_cmd:
+                        iface_b_moved_to_netns = True
 
                 records.append(
                     LabTestRecord(
@@ -992,9 +1016,12 @@ class LocalWireGuardLoopbackLab:
                         netns_https_proc.wait(timeout=2.0)
                     except Exception:
                         pass
-                self._run_priv([ip_bin, "link", "del", self.IFACE_A], use_sudo=use_sudo)
-                self._run_priv([ip_bin, "link", "del", self.IFACE_B], use_sudo=use_sudo)
-                self._run_priv([ip_bin, "netns", "del", self.PEER_NETNS], use_sudo=use_sudo)
+                if created_iface_a:
+                    self._run_priv([ip_bin, "link", "del", self.IFACE_A], use_sudo=use_sudo)
+                if created_peer_netns:
+                    self._run_priv([ip_bin, "netns", "del", self.PEER_NETNS], use_sudo=use_sudo)
+                if created_iface_b and not iface_b_moved_to_netns:
+                    self._run_priv([ip_bin, "link", "del", self.IFACE_B], use_sudo=use_sudo)
 
         # Verify complete cleanup & restored routing table
         t_cln = time.perf_counter()

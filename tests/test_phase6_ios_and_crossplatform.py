@@ -216,7 +216,11 @@ class TestPhase6DualProxyOverRealOpenSshLoopback(unittest.TestCase):
         lab_helper = LocalOpenSshLoopbackLab()
         strict_parent = lab_helper._select_strictmodes_parent()
         strict_modes = "yes" if strict_parent is not None else "no"
-        current_user = getpass.getuser()
+        try:
+            import pwd
+            current_user = pwd.getpwuid(os.geteuid()).pw_name
+        except (ImportError, KeyError, OSError):
+            current_user = getpass.getuser()
 
         with tempfile.TemporaryDirectory(prefix=".jaro_p6_dual_", dir=strict_parent) as tmp:
             tmpdir = Path(tmp)
@@ -275,6 +279,7 @@ class TestPhase6DualProxyOverRealOpenSshLoopback(unittest.TestCase):
                 f"PasswordAuthentication no\n"
                 f"KbdInteractiveAuthentication no\n"
                 f"PubkeyAuthentication yes\n"
+                f"PermitRootLogin {'yes' if current_user == 'root' else 'no'}\n"
                 f"AllowUsers {current_user}\n"
                 f"AllowTcpForwarding yes\n"
                 f"X11Forwarding no\n"

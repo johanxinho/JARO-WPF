@@ -1,9 +1,9 @@
-name: Build JARO WPF Dual iOS IPAs ($0 COP)
+name: Build JARO WPF iOS artifacts (unsigned)
 
 on:
   workflow_dispatch:
   push:
-    branches: [ main, master, 'feature/**' ]
+    branches: [ main, master, 'feature/**', 'fix/**', 'bugfix/**' ]
     paths:
       - 'ios/**'
       - '.github/workflows/ios_build.yml'
@@ -43,13 +43,9 @@ jobs:
           git clone --depth 1 https://git.zx2c4.com/wireguard-apple /tmp/wireguard-apple
           echo "Compiling WireGuardKitGo static archive libwg-go.a for iOS (arm64)..."
           make -C /tmp/wireguard-apple/Sources/WireGuardKitGo PLATFORM_NAME=iphoneos ARCHS=arm64 DESTDIR=/tmp/wireguard-apple/Sources/WireGuardKitGo/out build version-header
-          cp -f /tmp/wireguard-apple/Sources/WireGuardKitGo/out/libwg-go.a /tmp/wireguard-apple/Sources/WireGuardKitGo/libwg-go.a || true
+          test -s /tmp/wireguard-apple/Sources/WireGuardKitGo/out/libwg-go.a
+          cp -f /tmp/wireguard-apple/Sources/WireGuardKitGo/out/libwg-go.a /tmp/wireguard-apple/Sources/WireGuardKitGo/libwg-go.a
           ls -lh /tmp/wireguard-apple/Sources/WireGuardKitGo/out/libwg-go.a
-          echo "Patching wireguard-apple Package.swift tools-version for Swift 5.10 / Xcode 15..."
-          sed -i '' 's/swift-tools-version:5.3/swift-tools-version:5.7/g' /tmp/wireguard-apple/Package.swift
-          git -C /tmp/wireguard-apple config user.email "ci@jarocomplements.test"
-          git -C /tmp/wireguard-apple config user.name "CI"
-          git -C /tmp/wireguard-apple commit -am "fix(spm): bump tools-version to 5.7 for iOS 15 / macOS 12 compatibility"
 
       - name: Generate Xcode Project from project.yml
         working-directory: ios
@@ -57,8 +53,6 @@ jobs:
           export JARO_ENABLE_WIREGUARDKIT=1
           export JARO_WIREGUARD_URL=/tmp/wireguard-apple
           xcodegen generate
-          sed -i '' 's/objectVersion = 77;/objectVersion = 60;/g' JaroWPF.xcodeproj/project.pbxproj || true
-          sed -i '' 's/compatibilityVersion = "Xcode 16.0"/compatibilityVersion = "Xcode 15.0"/g' JaroWPF.xcodeproj/project.pbxproj || true
           grep -E "(objectVersion|compatibilityVersion)" JaroWPF.xcodeproj/project.pbxproj | head -n 5
 
       - name: Build Unsigned Full App & Embedded PacketTunnel Extension
@@ -74,7 +68,7 @@ jobs:
             CODE_SIGNING_ALLOWED=NO \
             CODE_SIGNING_REQUIRED=NO \
             CODE_SIGN_IDENTITY="" \
-            LIBRARY_SEARCH_PATHS="$(inherited) /tmp/wireguard-apple/Sources/WireGuardKitGo/out /tmp/wireguard-apple/Sources/WireGuardKitGo" \
+            LIBRARY_SEARCH_PATHS='$(inherited) /tmp/wireguard-apple/Sources/WireGuardKitGo/out /tmp/wireguard-apple/Sources/WireGuardKitGo' \
             BUILD_DIR="${{ github.workspace }}/build-full"
 
       - name: Verify Full Bundle & PacketTunnel Embedding
@@ -85,12 +79,14 @@ jobs:
 
           PLUGINS_PATH="$APP_PATH/PlugIns"
           echo "Inspecting embedded PlugIns directory: $PLUGINS_PATH"
-          ls -la "$PLUGINS_PATH" || true
+          ls -la "$PLUGINS_PATH"
           test -d "$PLUGINS_PATH/JaroPacketTunnel.appex" || (echo "ERROR: JaroPacketTunnel.appex missing" && exit 1)
 
-          # Ensure NSExtension metadata is present in JaroPacketTunnel.appex Info.plist
-          plutil -insert NSExtension -xml '<dict><key>NSExtensionPointIdentifier</key><string>com.apple.networkextension.packet-tunnel</string><key>NSExtensionPrincipalClass</key><string>JaroPacketTunnel.PacketTunnelProvider</string></dict>' "$PLUGINS_PATH/JaroPacketTunnel.appex/Info.plist" 2>/dev/null || true
-          plutil -p "$PLUGINS_PATH/JaroPacketTunnel.appex/Info.plist"
+          # Fail instead of patching a broken extension bundle after the build.
+          INFO_PLIST="$PLUGINS_PATH/JaroPacketTunnel.appex/Info.plist"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPointIdentifier' "$INFO_PLIST")" = "com.apple.networkextension.packet-tunnel"
+          test "$(/usr/libexec/PlistBuddy -c 'Print :NSExtension:NSExtensionPrincipalClass' "$INFO_PLIST")" = "JaroPacketTunnel.PacketTunnelProvider"
+          plutil -p "$INFO_PLIST"
 
           # Package Payload into unsigned IPA
           mkdir -p build-full/Payload
@@ -132,8 +128,6 @@ jobs:
         working-directory: ios
         run: |
           xcodegen generate
-          sed -i '' 's/objectVersion = 77;/objectVersion = 60;/g' JaroWPF.xcodeproj/project.pbxproj || true
-          sed -i '' 's/compatibilityVersion = "Xcode 16.0"/compatibilityVersion = "Xcode 15.0"/g' JaroWPF.xcodeproj/project.pbxproj || true
           grep -E "(objectVersion|compatibilityVersion)" JaroWPF.xcodeproj/project.pbxproj | head -n 5
 
       - name: Build Unsigned Standalone Application (JaroAppStandalone)
@@ -155,11 +149,12 @@ jobs:
           echo "Found standalone app bundle at: $APP_PATH"
           test -d "$APP_PATH" || (echo "ERROR: JaroWPF-Standalone.app not generated" && exit 1)
 
-          # Verify that PlugIns does NOT exist in standalone target
+          # Standalone intentionally omits PacketTunnel, but the IPA remains unsigned and needs signing.
           if [ -d "$APP_PATH/PlugIns" ]; then
-            echo "WARNING: Standalone bundle should not contain PlugIns"
+            echo "ERROR: Standalone bundle must not contain VPN PlugIns"
+            exit 1
           else
-            echo "CONFIRMED: Standalone bundle has zero app extensions (compatible with free Personal Team Apple ID)"
+            echo "CONFIRMED: Standalone bundle has no PacketTunnel extension"
           fi
 
           # Package Payload into unsigned IPA
