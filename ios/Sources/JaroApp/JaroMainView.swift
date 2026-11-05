@@ -161,7 +161,7 @@ public struct JaroMainView: View {
         NavigationStack {
             Form {
                 TextField("ID del perfil (ej. wg-propio-01)", text: $wgProfileIdInput)
-                    .textInputAutocapitalization(.never)
+                    .jaroNoAutoCase()
                 TextField("Nombre visible", text: $wgDisplayNameInput)
                 TextEditor(text: $wgConfTextInput)
                     .frame(minHeight: 180)
@@ -232,12 +232,12 @@ private struct SSHProfileSetupSheet: View {
         NavigationStack {
             Form {
                 Section("Servidor SSH") {
-                    TextField("ID único", text: $profileId).textInputAutocapitalization(.never)
+                    TextField("ID único", text: $profileId).jaroNoAutoCase()
                     TextField("Nombre", text: $displayName)
-                    TextField("IP o dominio", text: $host).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    TextField("Puerto", text: $port).keyboardType(.numberPad)
-                    TextField("Usuario Linux", text: $username).textInputAutocapitalization(.never).autocorrectionDisabled()
-                    TextField("Huella SHA256 del servidor", text: $fingerprint).textInputAutocapitalization(.never).autocorrectionDisabled()
+                    TextField("IP o dominio", text: $host).jaroNoAutoCase()
+                    TextField("Puerto", text: $port).jaroNumericInput()
+                    TextField("Usuario Linux", text: $username).jaroNoAutoCase()
+                    TextField("Huella SHA256 del servidor", text: $fingerprint).jaroNoAutoCase()
                 }
 
                 Section("Clave de acceso JARO") {
@@ -308,6 +308,26 @@ private struct SSHProfileSetupSheet: View {
         appendSSHString(algorithm, to: &blob)
         appendSSHString(rawPublicKey, to: &blob)
         return "ssh-ed25519 \(blob.base64EncodedString()) jaro-wpf-iphone"
+    }
+}
+
+private extension View {
+    @ViewBuilder
+    func jaroNoAutoCase() -> some View {
+        #if canImport(UIKit)
+        self.textInputAutocapitalization(.never).autocorrectionDisabled()
+        #else
+        self
+        #endif
+    }
+
+    @ViewBuilder
+    func jaroNumericInput() -> some View {
+        #if canImport(UIKit)
+        self.keyboardType(.numberPad)
+        #else
+        self
+        #endif
     }
 }
 #endif
