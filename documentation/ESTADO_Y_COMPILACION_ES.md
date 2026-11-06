@@ -32,11 +32,13 @@ python3 -m compileall -q core tests
 python3 -m unittest discover -s tests -v
 ```
 
-Resultado al cerrar la primera auditoría: **73 pruebas aprobadas**; en la segunda fase se añadieron contratos iOS y el total actual es **74 pruebas Python aprobadas**. Incluyen QUIC/DoQ, DNS, coste/failover, seguridad, perfiles, Windows por contratos, SSH/OpenSSH loopback real, SOCKS5, HTTP CONNECT y HTTPS local. `git diff --check` también pasó. Los escenarios que usan fallos inyectados son explícitamente simulados; no cuentan como prueba de conectividad remota.
+Resultado al cerrar la primera auditoría: **73 pruebas aprobadas**; la segunda fase elevó el total a **74**, y la fase 3 añade dos casos para un total actual de **76 pruebas Python aprobadas**. Incluyen QUIC/DoQ, DNS, coste/failover, seguridad, perfiles, Windows por contratos, SSH/OpenSSH loopback real, SOCKS5, HTTP CONNECT y HTTPS local. `git diff --check` también pasó. Los escenarios que usan fallos inyectados son explícitamente simulados; no cuentan como prueba de conectividad remota.
 
 En GitHub Actions, el commit `af03caf` pasó los tests Python y ambos jobs iOS en macOS/Xcode 16.4: `swift test`, generación de `libwg-go.a`, build Full, validación del PacketTunnel embebido, build Standalone y carga de ambos IPA. [Ver ejecución y artefactos del workflow](https://github.com/johanxinho/JARO-WPF/actions/runs/42135602853). Esta validación es de compilación/empaquetado, no de firma ni ejecución en un iPhone.
 
 La segunda fase, commit `1f327bd`, volvió a pasar `swift test` y compiló/subió Full (WireGuardKit + PacketTunnel embebido) y Standalone sin extensión; la suite Python también pasó. [Ver build iOS](https://github.com/johanxinho/JARO-WPF/actions/runs/42139469499) y [Python CI](https://github.com/johanxinho/JARO-WPF/actions/runs/42139469581). Los IPA no están firmados y no se instalaron ni probaron en iPhone.
+
+La fase 3, commit `f0aa53c`, volvió a pasar los XCTest `JaroCoreTests`, compiló Full y Standalone en macOS/Xcode y pasó Python CI. [Ver build iOS](https://github.com/johanxinho/JARO-WPF/actions/runs/42144398395) y [Python CI](https://github.com/johanxinho/JARO-WPF/actions/runs/42144398598). Se descargaron y comprobaron ZIP, Info.plist y extensión; ambos IPA siguen unsigned y no son una prueba de conexión ni de instalación física. Los hashes están en [FASE3_DNS_WIREGUARD_LAB_IOS_ES.md](FASE3_DNS_WIREGUARD_LAB_IOS_ES.md).
 
 ## Límites no verificables aquí
 

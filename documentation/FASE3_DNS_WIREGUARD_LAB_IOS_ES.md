@@ -2,7 +2,9 @@
 
 **Rama:** `fix/jaro-functional-hardening`  
 **Base de trabajo solicitada:** `7cd7d61`  
-**Estado de verificación:** la compilación física, firma Apple e instalación en un iPhone 12 aún requieren cuenta/perfiles autorizados y un Mac/Xcode. Esta rama no contiene claves, perfiles de firma ni servidores del usuario.
+**Commit de fase 3:** `f0aa53c2995279ffd76463037ade516fbf43900f`
+**CI:** Python [run 42144398598](https://github.com/johanxinho/JARO-WPF/actions/runs/42144398598) y macOS/Xcode [run 42144398395](https://github.com/johanxinho/JARO-WPF/actions/runs/42144398395) completaron con éxito en este SHA. Pasaron `JaroCoreTests`, la build Full con PacketTunnel y la build Standalone; el IPA Full contiene `com.jarocomplements.jarowpf.PacketTunnel` y Standalone no incluye extensión.
+**Estado de verificación:** los dos IPA unsigned se validaron como ZIP y sus Info.plist/bundles se inspeccionaron. La compilación física, firma Apple e instalación en iPhone 12 aún requieren cuenta/perfiles autorizados y Mac/Xcode; esto no es una prueba de conexión real. Esta rama no contiene claves, perfiles de firma ni servidores del usuario.
 
 ## Matriz funcional
 
@@ -121,6 +123,13 @@ La matriz oficial de Apple consultada para las fases anteriores distingue App Gr
 Los IPA de GitHub Actions son deliberadamente unsigned: sirven para comprobar estructura/build y no se instalan normalmente en un iPhone. No se recomienda usar certificados/perfiles compartidos de terceros ni métodos que prometan fabricar un entitlement que el equipo Apple no tiene.
 
 ## Comprobación disponible y siguiente paso físico
+
+Los artefactos descargados del run 42144398395 son unsigned y corresponden exactamente al commit de fase 3. SHA-256:
+
+| Artefacto | Tamaño | SHA-256 |
+|---|---:|---|
+| Full (PacketTunnel embebido) | 7,193,942 bytes | `5b0145f3f635045e3482b08db0491f6098a5c5f91109c5f9ad551d99b43c5b25` |
+| Standalone (sin extensión) | 2,512,188 bytes | `420604edc7dd37ff70e0229a8fb90fb3405c76e88cff5b8f632efc6480ff10b8` |
 
 En Linux se pueden ejecutar:
 
