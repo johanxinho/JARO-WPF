@@ -19,6 +19,8 @@ public enum JaroWireGuardEngineError: Error, LocalizedError {
     case invalidPeerPublicKey
     case invalidPresharedKey
     case invalidAddressCIDR(String)
+    case invalidDNSServer(String)
+    case unauthorizedDNSOverride
     case invalidAllowedIPRange(String)
     case invalidEndpoint(String)
     case unauthorizedGlobalRoute
@@ -37,6 +39,10 @@ public enum JaroWireGuardEngineError: Error, LocalizedError {
             return "Invalid 32-byte WireGuard PresharedKey retrieved from Keychain"
         case .invalidAddressCIDR(let cidr):
             return "Invalid WireGuard interface CIDR: \(cidr)"
+        case .invalidDNSServer(let address):
+            return "Invalid WireGuard DNS server IP address: \(address)"
+        case .unauthorizedDNSOverride:
+            return "WireGuard DNS override is missing explicit user authorization"
         case .invalidAllowedIPRange(let cidr):
             return "Invalid WireGuard AllowedIPs CIDR: \(cidr)"
         case .invalidEndpoint(let ep):
@@ -72,10 +78,36 @@ public final class JaroWireGuardEngine: @unchecked Sendable {
 
     /// Parses WireGuard UAPI `get=1` key-value lines (`rx_bytes=`, `tx_bytes=`, `last_handshake_time_sec=`)
     /// returned by `WireGuardAdapter.getRuntimeConfiguration`.
-    public static func parseUAPIRuntimeConfiguration(_ uapiText: String) -> JaroTrafficStats {
+    public static func parseUAPIRuntimeConfiguration(
+        _ uapiText: String,
+        peerPublicKeyB64: String? = nil
+    ) -> JaroTrafficStats {
         var rxTotal: UInt64 = 0
         var txTotal: UInt64 = 0
         var latestHandshake: Int64?
+        let expectedPeerHex: String?
+        if let peerPublicKeyB64 {
+            guard let keyData = Data(base64Encoded: peerPublicKeyB64), keyData.count == 32 else {
+                return JaroTrafficStats()
+            }
+            expectedPeerHex = keyData.map { String(format: "%02x", $0) }.joined()
+        } else {
+            expectedPeerHex = nil
+        }
+        var currentPeerHex: String?
+        var peerRX: UInt64 = 0
+        var peerTX: UInt64 = 0
+        var peerHandshake: Int64?
+
+        func accumulatePeer() {
+            guard let currentPeerHex,
+                  expectedPeerHex == nil || currentPeerHex == expectedPeerHex else { return }
+            rxTotal &+= peerRX
+            txTotal &+= peerTX
+            if let peerHandshake {
+                latestHandshake = max(latestHandshake ?? peerHandshake, peerHandshake)
+            }
+        }
 
         for rawLine in uapiText.components(separatedBy: .newlines) {
             let line = rawLine.trimmingCharacters(in: .whitespacesAndNewlines)
@@ -83,22 +115,23 @@ public final class JaroWireGuardEngine: @unchecked Sendable {
             let key = String(line[..<eq])
             let val = String(line[line.index(after: eq)...])
             switch key {
+            case "public_key":
+                accumulatePeer()
+                currentPeerHex = val.lowercased()
+                peerRX = 0
+                peerTX = 0
+                peerHandshake = nil
             case "rx_bytes":
-                if let v = UInt64(val) { rxTotal &+= v }
+                if let v = UInt64(val) { peerRX = v }
             case "tx_bytes":
-                if let v = UInt64(val) { txTotal &+= v }
+                if let v = UInt64(val) { peerTX = v }
             case "last_handshake_time_sec":
-                if let sec = Int64(val), sec > 0 {
-                    if let prev = latestHandshake {
-                        latestHandshake = max(prev, sec)
-                    } else {
-                        latestHandshake = sec
-                    }
-                }
+                if let sec = Int64(val), sec > 0 { peerHandshake = sec }
             default:
                 break
             }
         }
+        accumulatePeer()
         return JaroTrafficStats(
             rxBytes: rxTotal,
             txBytes: txTotal,
@@ -239,7 +272,7 @@ public final class JaroWireGuardEngine: @unchecked Sendable {
         #endif
     }
 
-    public func fetchRuntimeStats() async -> JaroTrafficStats {
+    public func fetchRuntimeStats(peerPublicKeyB64: String? = nil) async -> JaroTrafficStats {
         #if canImport(WireGuardKit)
         guard let wgAdapter = self.adapter else { return JaroTrafficStats() }
         return await withCheckedContinuation { continuation in
@@ -248,7 +281,7 @@ public final class JaroWireGuardEngine: @unchecked Sendable {
                     continuation.resume(returning: JaroTrafficStats())
                     return
                 }
-                continuation.resume(returning: Self.parseUAPIRuntimeConfiguration(uapi))
+                continuation.resume(returning: Self.parseUAPIRuntimeConfiguration(uapi, peerPublicKeyB64: peerPublicKeyB64))
             }
         }
         #else
@@ -270,8 +303,14 @@ public final class JaroWireGuardEngine: @unchecked Sendable {
         guard let peerPublicKey = PublicKey(base64Key: wgSection.peerPublicKeyB64) else {
             throw JaroWireGuardEngineError.invalidPeerPublicKey
         }
-        guard let ifaceRange = IPAddressRange(from: wgSection.tunnelAddressCIDR) else {
-            throw JaroWireGuardEngineError.invalidAddressCIDR(wgSection.tunnelAddressCIDR)
+        let addressCIDRs = (wgSection.tunnelAddressesCIDR?.isEmpty == false)
+            ? (wgSection.tunnelAddressesCIDR ?? [])
+            : [wgSection.tunnelAddressCIDR]
+        let interfaceRanges = try addressCIDRs.map { cidr -> IPAddressRange in
+            guard let range = IPAddressRange(from: cidr) else {
+                throw JaroWireGuardEngineError.invalidAddressCIDR(cidr)
+            }
+            return range
         }
         let formattedEndpoint = profile.host.contains(":")
             ? "[\(profile.host)]:\(profile.port)"
@@ -281,8 +320,18 @@ public final class JaroWireGuardEngine: @unchecked Sendable {
         }
 
         var interfaceConfig = InterfaceConfiguration(privateKey: privateKey)
-        interfaceConfig.addresses = [ifaceRange]
+        interfaceConfig.addresses = interfaceRanges
         interfaceConfig.mtu = UInt16(profile.mtu)
+        let dnsAddresses = wgSection.dnsServers ?? []
+        if !dnsAddresses.isEmpty && wgSection.dnsOverrideAuthorized != true {
+            throw JaroWireGuardEngineError.unauthorizedDNSOverride
+        }
+        interfaceConfig.dns = try dnsAddresses.map { address -> DNSServer in
+            guard let server = DNSServer(from: address) else {
+                throw JaroWireGuardEngineError.invalidDNSServer(address)
+            }
+            return server
+        }
 
         var peerConfig = PeerConfiguration(publicKey: peerPublicKey)
         peerConfig.endpoint = endpoint

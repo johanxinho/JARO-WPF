@@ -126,8 +126,11 @@ def validate_wireguard_config_text(
     """Validates a WireGuard configuration without logging or leaking key material."""
     section: Optional[str] = None
     interface_data: Dict[str, List[str]] = {}
+    interface_seen = False
     peers: List[Dict[str, List[str]]] = []
     current_peer: Optional[Dict[str, List[str]]] = None
+    allowed_interface_keys = {"privatekey", "address", "dns", "mtu"}
+    allowed_peer_keys = {"publickey", "presharedkey", "endpoint", "allowedips", "persistentkeepalive"}
 
     for line_no, raw_line in enumerate(config_text.splitlines(), start=1):
         line = raw_line.split("#", 1)[0].strip()
@@ -137,8 +140,9 @@ def validate_wireguard_config_text(
         if line.startswith("[") and line.endswith("]"):
             sec_name = line[1:-1].strip().lower()
             if sec_name == "interface":
-                if interface_data:
+                if interface_seen:
                     return {"valid": False, "error": f"Duplicate [Interface] section at line {line_no}"}
+                interface_seen = True
                 section = "interface"
                 current_peer = None
             elif sec_name == "peer":
@@ -157,8 +161,16 @@ def validate_wireguard_config_text(
         v_clean = val.strip()
 
         if section == "interface":
+            if k_lower not in allowed_interface_keys:
+                return {"valid": False, "error": f"Unsupported Interface directive '{k_lower}' at line {line_no}"}
+            if k_lower in interface_data:
+                return {"valid": False, "error": f"Duplicate Interface directive '{k_lower}' at line {line_no}"}
             interface_data.setdefault(k_lower, []).append(v_clean)
         elif section == "peer" and current_peer is not None:
+            if k_lower not in allowed_peer_keys:
+                return {"valid": False, "error": f"Unsupported Peer directive '{k_lower}' at line {line_no}"}
+            if k_lower in current_peer:
+                return {"valid": False, "error": f"Duplicate Peer directive '{k_lower}' at line {line_no}"}
             current_peer.setdefault(k_lower, []).append(v_clean)
 
     # Validate [Interface]
@@ -184,18 +196,28 @@ def validate_wireguard_config_text(
                 parsed_addresses.append(str(iface_ip))
             except ValueError:
                 return {"valid": False, "error": f"Invalid Interface Address CIDR: {item_s}"}
+    if not parsed_addresses:
+        return {"valid": False, "error": "Interface Address must contain at least one valid IP CIDR"}
 
     if "mtu" in interface_data:
         mtu_str = interface_data["mtu"][0]
-        if not mtu_str.isdigit() or not (1280 <= int(mtu_str) <= 65535):
-            return {"valid": False, "error": f"Invalid WireGuard MTU '{mtu_str}' (expected 1280..65535)"}
-
-    if "listenport" in interface_data:
-        lp_str = interface_data["listenport"][0]
-        if not lp_str.isdigit() or not (1 <= int(lp_str) <= 65535):
-            return {"valid": False, "error": f"Invalid WireGuard ListenPort '{lp_str}'"}
+        if not mtu_str.isdigit() or not (1280 <= int(mtu_str) <= 1500):
+            return {"valid": False, "error": f"Invalid WireGuard MTU '{mtu_str}' (JARO supports 1280..1500)"}
 
     modifies_dns = "dns" in interface_data
+    dns_servers: List[str] = []
+    if modifies_dns:
+        for group in interface_data["dns"]:
+            for raw_server in group.split(","):
+                server = raw_server.strip()
+                if not server:
+                    return {"valid": False, "modifies_dns": True, "error": "Empty DNS server in Interface DNS directive"}
+                try:
+                    dns_servers.append(str(ipaddress.ip_address(server)))
+                except ValueError:
+                    return {"valid": False, "modifies_dns": True, "error": f"Invalid DNS server IP address '{server}'"}
+        if not dns_servers or len(set(dns_servers)) != len(dns_servers):
+            return {"valid": False, "modifies_dns": True, "error": "DNS must contain unique IPv4/IPv6 address literals"}
     if modifies_dns and not allow_dns_override:
         return {
             "valid": False,
@@ -203,19 +225,11 @@ def validate_wireguard_config_text(
             "error": "Profile modifies system DNS without explicit allow_dns_override=True authorization",
         }
 
-    table_setting = interface_data.get("table", ["auto"])[0].lower()
-
-    # PreUp / PostUp / PreDown / PostDown arbitrary shell hooks rejected for safety
-    for hook in ("preup", "postup", "predown", "postdown", "saveconfig"):
-        if hook in interface_data:
-            return {
-                "valid": False,
-                "error": f"Disallowed shell/mutation directive '{hook}' in WireGuard profile",
-            }
+    table_setting = "auto"
 
     # Validate [Peer] sections
-    if not peers:
-        return {"valid": False, "error": "At least one [Peer] section is required"}
+    if len(peers) != 1:
+        return {"valid": False, "error": "JARO profile import requires exactly one [Peer] section"}
 
     modifies_global_routes = False
     parsed_peers_summary: List[Dict[str, Any]] = []
@@ -255,7 +269,7 @@ def validate_wireguard_config_text(
                 except ValueError:
                     return {"valid": False, "error": f"Invalid AllowedIPs CIDR '{cidr_s}' in Peer #{idx}"}
                 peer_networks.append(str(net))
-                if net in GLOBAL_ROUTE_NETWORKS and table_setting != "off":
+                if net.prefixlen <= 1:
                     modifies_global_routes = True
 
         parsed_peers_summary.append({
@@ -263,6 +277,16 @@ def validate_wireguard_config_text(
             "allowed_ips": peer_networks,
         })
 
+    risky_routes = {
+        ipaddress.ip_network(cidr)
+        for peer_summary in parsed_peers_summary
+        for cidr in peer_summary["allowed_ips"]
+        if ipaddress.ip_network(cidr).prefixlen <= 1
+    }
+    dual_stack_defaults = {
+        ipaddress.ip_network("0.0.0.0/0"),
+        ipaddress.ip_network("::/0"),
+    }
     if modifies_global_routes and not allow_global_routes:
         return {
             "valid": False,
@@ -272,6 +296,18 @@ def validate_wireguard_config_text(
                 "without explicit allow_global_routes=True authorization"
             ),
         }
+    if modifies_global_routes and risky_routes != dual_stack_defaults:
+        return {
+            "valid": False,
+            "modifies_global_routes": True,
+            "error": "Full-tunnel consent requires exactly both canonical defaults (0.0.0.0/0 and ::/0); /1 or single-stack defaults are rejected",
+        }
+    if modifies_global_routes:
+        families = {ipaddress.ip_interface(addr).version for addr in parsed_addresses}
+        if families != {4, 6}:
+            return {"valid": False, "modifies_global_routes": True, "error": "Full tunnel requires both IPv4 and IPv6 interface addresses"}
+        if not dns_servers:
+            return {"valid": False, "modifies_global_routes": True, "error": "Full tunnel requires an explicitly authorized DNS server to avoid using the physical-network resolver"}
 
     return {
         "valid": True,
@@ -279,6 +315,7 @@ def validate_wireguard_config_text(
         "modifies_dns": modifies_dns,
         "table": table_setting,
         "addresses": parsed_addresses,
+        "dns_servers": dns_servers,
         "peer_count": len(peers),
         "peers": parsed_peers_summary,
         "error": None,

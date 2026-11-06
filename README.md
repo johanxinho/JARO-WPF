@@ -32,3 +32,4 @@ with support for authorized free-access networks.
 - La suite Python se ejecuta con `python3 -m pip install -r requirements-dev.txt` y `python3 -m unittest discover -s tests -v`.
 - Las limitaciones de iOS, firma de Packet Tunnel, artefactos sin firmar y estado de verificación se documentan en [ESTADO_Y_COMPILACION_ES.md](documentation/ESTADO_Y_COMPILACION_ES.md).
 - La segunda fase audita el ciclo de `NEPacketTunnelProvider`, WireGuardKit, SSH/SOCKS5, DNS, rutas, App Groups y la vía legítima de firma en [FASE2_IOS_PACKET_TUNNEL_AUDITORIA_ES.md](documentation/FASE2_IOS_PACKET_TUNNEL_AUDITORIA_ES.md).
+- La tercera fase cubre round-trip DNS, consentimiento de full tunnel, diagnósticos por peer y el laboratorio Linux en [FASE3_DNS_WIREGUARD_LAB_IOS_ES.md](documentation/FASE3_DNS_WIREGUARD_LAB_IOS_ES.md); handshake, firma e instalación física siguen sin probarse hasta usar un servidor propio, un team autorizado y un iPhone.

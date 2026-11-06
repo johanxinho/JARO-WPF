@@ -5,6 +5,8 @@
 **Commit de código:** `1f327bdb3560256417fcc56d4c33e148632a1a38`  
 **Alcance:** iOS `NEPacketTunnelProvider`, `packetFlow`, WireGuardKit, SSH/SOCKS5/HTTP CONNECT, rutas, DNS, MTU, recuperación, App Groups, Keychain y firma/instalación.
 
+> Este informe conserva el diagnóstico histórico del commit `1f327bd`. La fase 3 implementa después la conservación de `DNS=`, consentimiento de full tunnel y `includeAllNetworks`; consulte [FASE3_DNS_WIREGUARD_LAB_IOS_ES.md](FASE3_DNS_WIREGUARD_LAB_IOS_ES.md) para el estado actualizado. La firma y prueba física continúan pendientes.
+
 ## Dictamen
 
 El repositorio contiene una **integración real de WireGuardKit en el ciclo de vida del Packet Tunnel**, no una implementación de red ficticia: `JaroWireGuardEngine` construye una `TunnelConfiguration`, crea `WireGuardAdapter(with: packetTunnelProvider)` y espera el callback de `start`. El release upstream fijado por CI instala `NEPacketTunnelNetworkSettings`, encuentra el descriptor `utun` y llama al backend `wg-go` (`wgTurnOn`). Esto no prueba que un túnel JARO haya transferido tráfico en un iPhone: faltan una firma con entitlement autorizado, un peer propio operativo y una prueba física con handshake, tráfico bidireccional y egress.

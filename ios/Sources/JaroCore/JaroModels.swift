@@ -89,6 +89,16 @@ public struct JaroTrafficStats: Codable, Equatable, Sendable {
     public var hasBidirectionalTransfer: Bool {
         rxBytes > 0 && txBytes > 0
     }
+
+    public var handshakeAgeSeconds: Int64? {
+        guard let epoch = lastHandshakeEpochSec, epoch > 0 else { return nil }
+        return Int64(Date().timeIntervalSince1970) - epoch
+    }
+
+    public var hasFreshHandshake: Bool {
+        guard let age = handshakeAgeSeconds else { return false }
+        return (-2...180).contains(age)
+    }
 }
 
 /// Independent capability matrix matching Phase 4/5 diagnostic precision (never conflates DNS with HTTPS).
@@ -99,6 +109,10 @@ public struct JaroCapabilityMatrix: Codable, Equatable, Sendable {
     public var wireguardHandshake: Bool
     public var wireguardBidirectionalTransfer: Bool
     public var wireguardVerifiedHTTPS: Bool
+    public var wireguardDNSConfigured: Bool
+    public var wireguardDNSResolutionVerified: Bool
+    public var wireguardRXDeltaBytes: UInt64
+    public var wireguardTXDeltaBytes: UInt64
     public var captivePortalDetected: Bool
 
     public init(
@@ -108,6 +122,10 @@ public struct JaroCapabilityMatrix: Codable, Equatable, Sendable {
         wireguardHandshake: Bool = false,
         wireguardBidirectionalTransfer: Bool = false,
         wireguardVerifiedHTTPS: Bool = false,
+        wireguardDNSConfigured: Bool = false,
+        wireguardDNSResolutionVerified: Bool = false,
+        wireguardRXDeltaBytes: UInt64 = 0,
+        wireguardTXDeltaBytes: UInt64 = 0,
         captivePortalDetected: Bool = false
     ) {
         self.localProxyListening = localProxyListening
@@ -116,6 +134,10 @@ public struct JaroCapabilityMatrix: Codable, Equatable, Sendable {
         self.wireguardHandshake = wireguardHandshake
         self.wireguardBidirectionalTransfer = wireguardBidirectionalTransfer
         self.wireguardVerifiedHTTPS = wireguardVerifiedHTTPS
+        self.wireguardDNSConfigured = wireguardDNSConfigured
+        self.wireguardDNSResolutionVerified = wireguardDNSResolutionVerified
+        self.wireguardRXDeltaBytes = wireguardRXDeltaBytes
+        self.wireguardTXDeltaBytes = wireguardTXDeltaBytes
         self.captivePortalDetected = captivePortalDetected
     }
 }
@@ -176,19 +198,35 @@ public struct JaroCryptoReferences: Codable, Equatable, Sendable {
 
 public struct JaroWireGuardSection: Codable, Equatable, Sendable {
     public let tunnelAddressCIDR: String
+    public let tunnelAddressesCIDR: [String]?
     public let peerPublicKeyB64: String
     public let persistentKeepaliveSec: Int?
+    public let dnsServers: [String]?
+    public let dnsOverrideAuthorized: Bool?
 
     enum CodingKeys: String, CodingKey {
         case tunnelAddressCIDR = "tunnel_address_cidr"
+        case tunnelAddressesCIDR = "tunnel_addresses_cidr"
         case peerPublicKeyB64 = "peer_public_key_b64"
         case persistentKeepaliveSec = "persistent_keepalive_s"
+        case dnsServers = "dns_servers"
+        case dnsOverrideAuthorized = "dns_override_authorized"
     }
 
-    public init(tunnelAddressCIDR: String, peerPublicKeyB64: String, persistentKeepaliveSec: Int? = nil) {
+    public init(
+        tunnelAddressCIDR: String,
+        tunnelAddressesCIDR: [String]? = nil,
+        peerPublicKeyB64: String,
+        persistentKeepaliveSec: Int? = nil,
+        dnsServers: [String]? = nil,
+        dnsOverrideAuthorized: Bool? = nil
+    ) {
         self.tunnelAddressCIDR = tunnelAddressCIDR
+        self.tunnelAddressesCIDR = tunnelAddressesCIDR
         self.peerPublicKeyB64 = peerPublicKeyB64
         self.persistentKeepaliveSec = persistentKeepaliveSec
+        self.dnsServers = dnsServers
+        self.dnsOverrideAuthorized = dnsOverrideAuthorized
     }
 }
 
@@ -312,16 +350,19 @@ public struct JaroPortableProfile: Codable, Identifiable, Equatable, Sendable {
 public enum JaroTunnelIPCCommand: String, Codable, Sendable {
     case statusSnapshot = "status_snapshot"
     case verifyHTTPSEgress = "verify_https_egress"
+    case verifyDNSResolution = "verify_dns_resolution"
     case recentLogs = "recent_logs"
 }
 
 public struct JaroTunnelIPCRequest: Codable, Sendable {
     public let command: JaroTunnelIPCCommand
     public let probeURLString: String?
+    public let dnsQueryName: String?
 
-    public init(command: JaroTunnelIPCCommand, probeURLString: String? = nil) {
+    public init(command: JaroTunnelIPCCommand, probeURLString: String? = nil, dnsQueryName: String? = nil) {
         self.command = command
         self.probeURLString = probeURLString
+        self.dnsQueryName = dnsQueryName
     }
 }
 

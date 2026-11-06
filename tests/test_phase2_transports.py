@@ -281,24 +281,31 @@ class TestWireGuardEngine(unittest.TestCase):
         global_route_conf = (
             f"[Interface]\n"
             f"PrivateKey = {self.priv}\n"
-            f"Address = 10.66.66.2/32\n\n"
+            f"Address = 10.66.66.2/32, fd66::2/128\n"
+            f"DNS = 10.66.66.1, fd66::1\n\n"
             f"[Peer]\n"
             f"PublicKey = {self.pub}\n"
             f"Endpoint = 198.51.100.10:51820\n"
             f"AllowedIPs = 0.0.0.0/0, ::/0\n"
         )
         # Blocked by default when allow_global_routes=False
-        blocked = validate_wireguard_config_text(global_route_conf, allow_global_routes=False)
+        blocked = validate_wireguard_config_text(
+            global_route_conf, allow_global_routes=False, allow_dns_override=True
+        )
         self.assertFalse(blocked["valid"])
         self.assertTrue(blocked["modifies_global_routes"])
 
         # Allowed only when explicitly authorized
-        allowed = validate_wireguard_config_text(global_route_conf, allow_global_routes=True)
+        allowed = validate_wireguard_config_text(
+            global_route_conf, allow_global_routes=True, allow_dns_override=True
+        )
         self.assertTrue(allowed["valid"])
 
         # Split-tunnel subnet route works without modifying global default routes
         split_conf = global_route_conf.replace("0.0.0.0/0, ::/0", "10.66.66.0/24")
-        split_ok = validate_wireguard_config_text(split_conf, allow_global_routes=False)
+        split_ok = validate_wireguard_config_text(
+            split_conf, allow_global_routes=False, allow_dns_override=True
+        )
         self.assertTrue(split_ok["valid"])
         self.assertFalse(split_ok["modifies_global_routes"])
 

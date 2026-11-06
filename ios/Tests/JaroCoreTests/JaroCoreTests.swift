@@ -4,8 +4,10 @@
 
 import Foundation
 import JaroCore
+import JaroDiagnostics
 import JaroProfiles
 import JaroSecurity
+import JaroTunnelEngine
 import XCTest
 
 final class JaroCoreTests: XCTestCase {
@@ -133,5 +135,118 @@ final class JaroCoreTests: XCTestCase {
                 configuredAccessGroup: "ABCDE12345.\(expectedGroup)"
             )
         )
+    }
+
+    func testWireGuardDNSIPv4IPv6FullTunnelConsentAndPortableRoundTrip() throws {
+        let vault = JaroInMemorySecretVault()
+        let manager = JaroProfileManager(secretStore: vault)
+        let privateKey = Data(repeating: 0x31, count: 32).base64EncodedString()
+        let peerKey = Data(repeating: 0x42, count: 32).base64EncodedString()
+        let conf = """
+        [Interface]
+        PrivateKey = \(privateKey)
+        Address = 10.77.0.2/24, fd77::2/64
+        DNS = 10.77.0.1, fd77::1
+        MTU = 1420
+
+        [Peer]
+        PublicKey = \(peerKey)
+        Endpoint = 203.0.113.8:51820
+        AllowedIPs = 0.0.0.0/0, ::/0
+        PersistentKeepalive = 25
+        """
+
+        XCTAssertThrowsError(try manager.importWireGuardConf(
+            profileId: "wg-consent-missing-dns", displayName: "No DNS consent", confText: conf, authorized: true,
+            allowGlobalRoutes: true, allowDNSOverride: false
+        ))
+        XCTAssertThrowsError(try manager.importWireGuardConf(
+            profileId: "wg-consent-missing-routes", displayName: "No route consent", confText: conf, authorized: true,
+            allowGlobalRoutes: false, allowDNSOverride: true
+        ))
+
+        let profile = try manager.importWireGuardConf(
+            profileId: "wg-dual-stack-full", displayName: "Dual-stack full tunnel", confText: conf, authorized: true,
+            allowGlobalRoutes: true, allowDNSOverride: true
+        )
+        XCTAssertTrue(profile.includeDefaultRoute)
+        XCTAssertEqual(profile.wireguard?.tunnelAddressesCIDR, ["10.77.0.2/24", "fd77::2/64"])
+        XCTAssertEqual(profile.wireguard?.dnsServers, ["10.77.0.1", "fd77::1"])
+        XCTAssertEqual(profile.wireguard?.dnsOverrideAuthorized, true)
+
+        let exported = try manager.exportPortableJSON(profileId: profile.profileId)
+        XCTAssertFalse(String(data: exported, encoding: .utf8)!.contains(privateKey))
+        let imported = try manager.importPortableJSON(
+            exported, persist: false, allowGlobalRoutes: true, allowDNSOverride: true
+        )
+        XCTAssertEqual(imported.wireguard?.dnsServers, ["10.77.0.1", "fd77::1"])
+        XCTAssertEqual(imported.wireguard?.tunnelAddressesCIDR?.count, 2)
+        XCTAssertThrowsError(try JaroProfileManager(secretStore: vault).importPortableJSON(exported))
+    }
+
+    func testWireGuardRejectsInvalidDNSMTUIncompleteFullTunnelAndMultiplePeers() throws {
+        let privateKey = Data(repeating: 0x31, count: 32).base64EncodedString()
+        let peerKey = Data(repeating: 0x42, count: 32).base64EncodedString()
+        let manager = JaroProfileManager(secretStore: JaroInMemorySecretVault())
+        func config(address: String, dns: String, mtu: String, allowed: String, extraPeer: String = "") -> String {
+            """
+            [Interface]
+            PrivateKey = \(privateKey)
+            Address = \(address)
+            DNS = \(dns)
+            MTU = \(mtu)
+            [Peer]
+            PublicKey = \(peerKey)
+            Endpoint = 203.0.113.8:51820
+            AllowedIPs = \(allowed)
+            \(extraPeer)
+            """
+        }
+        for invalid in [
+            config(address: "10.77.0.2/24", dns: "resolver.example", mtu: "1420", allowed: "10.77.0.0/24"),
+            config(address: "10.77.0.2/24", dns: "10.77.0.1", mtu: "9000", allowed: "10.77.0.0/24"),
+            config(address: "10.77.0.2/24", dns: "10.77.0.1", mtu: "1420", allowed: "0.0.0.0/0"),
+            config(address: "bad-cidr", dns: "10.77.0.1", mtu: "1420", allowed: "10.77.0.0/24"),
+            config(address: "10.77.0.2/24", dns: "10.77.0.1", mtu: "1420", allowed: "10.77.0.0/24", extraPeer: "[Peer]\nPublicKey = \(peerKey)\nEndpoint = 203.0.113.9:51820\nAllowedIPs = 10.78.0.0/24")
+        ] {
+            XCTAssertThrowsError(try manager.importWireGuardConf(
+                profileId: "wg-invalid-\(UUID().uuidString.prefix(8))", displayName: "Invalid", confText: invalid,
+                authorized: true, allowGlobalRoutes: true, allowDNSOverride: true
+            ))
+        }
+    }
+
+    func testWireGuardUAPIStatsAreBoundToConfiguredPeerAndFreshness() {
+        let now = Int64(Date().timeIntervalSince1970)
+        let targetKey = Data(repeating: 0x11, count: 32).base64EncodedString()
+        let otherHex = String(repeating: "22", count: 32)
+        let targetHex = String(repeating: "11", count: 32)
+        let uapi = """
+        public_key=\(otherHex)
+        last_handshake_time_sec=\(now)
+        rx_bytes=900
+        tx_bytes=800
+        public_key=\(targetHex)
+        last_handshake_time_sec=\(now)
+        rx_bytes=120
+        tx_bytes=95
+        """
+        let selected = JaroWireGuardEngine.parseUAPIRuntimeConfiguration(uapi, peerPublicKeyB64: targetKey)
+        XCTAssertEqual(selected.rxBytes, 120)
+        XCTAssertEqual(selected.txBytes, 95)
+        XCTAssertTrue(selected.hasFreshHandshake)
+
+        let wrongPeer = JaroWireGuardEngine.parseUAPIRuntimeConfiguration(uapi, peerPublicKeyB64: Data(repeating: 0x33, count: 32).base64EncodedString())
+        XCTAssertEqual(wrongPeer.rxBytes, 0)
+        XCTAssertEqual(wrongPeer.txBytes, 0)
+        XCTAssertFalse(wrongPeer.hasFreshHandshake)
+    }
+
+    func testDNSQueryNameValidationDoesNotContactPublicResolvers() {
+        XCTAssertTrue(JaroDNSResolutionDiagnostic.isValidQueryName("router.lab.internal"))
+        XCTAssertTrue(JaroDNSResolutionDiagnostic.isValidQueryName("my-owned-domain.example"))
+        XCTAssertFalse(JaroDNSResolutionDiagnostic.isValidQueryName("10.0.0.1"))
+        XCTAssertFalse(JaroDNSResolutionDiagnostic.isValidQueryName("bad..label"))
+        XCTAssertFalse(JaroDNSResolutionDiagnostic.isValidQueryName("-invalid.example"))
     }
 }

@@ -86,8 +86,11 @@ class JaroTunnelProfile:
     mtu: int = 1420
     # WireGuard non-secret metadata + Keychain reference
     tunnel_address_cidr: Optional[str] = None
+    tunnel_addresses_cidr: List[str] = field(default_factory=list)
     peer_public_key_b64: Optional[str] = None
     persistent_keepalive_s: Optional[int] = None
+    dns_servers: List[str] = field(default_factory=list)
+    dns_override_authorized: bool = False
     keychain_secret_ref: str = ""
     keychain_psk_ref: Optional[str] = None
     # SSH/SOCKS5 non-secret metadata + Keychain reference
@@ -117,28 +120,63 @@ class JaroTunnelProfile:
 
         # Validate route isolation invariant
         normalized_routes: List[str] = []
+        risky_routes = set()
         for raw_cidr in self.included_routes:
             try:
                 net = ipaddress.ip_network(raw_cidr.strip(), strict=False)
             except ValueError as exc:
                 raise JaroProfileError(f"Invalid CIDR in included_routes ({raw_cidr!r}): {exc}") from exc
-            if net in GLOBAL_ROUTE_NETWORKS and not self.include_default_route:
-                raise JaroProfileError(
-                    f"Global route {net} rejected because include_default_route is False"
-                )
+            if net.prefixlen <= 1:
+                risky_routes.add(net)
             normalized_routes.append(str(net))
         self.included_routes = normalized_routes
 
+        dual_stack_defaults = {ipaddress.ip_network("0.0.0.0/0"), ipaddress.ip_network("::/0")}
+        if risky_routes and not self.include_default_route:
+            raise JaroProfileError("Global/default /1 routes require explicit include_default_route consent")
+        if risky_routes and risky_routes != dual_stack_defaults:
+            raise JaroProfileError("Full tunnel requires exactly both canonical IPv4/IPv6 defaults; /1 and single-stack defaults are rejected")
+        if self.include_default_route and not risky_routes:
+            raise JaroProfileError("include_default_route consent is invalid without both full-tunnel default routes")
+
         if self.protocol == "wireguard":
-            if not self.tunnel_address_cidr:
+            addresses = list(self.tunnel_addresses_cidr)
+            if not addresses and self.tunnel_address_cidr:
+                addresses = [self.tunnel_address_cidr]
+            if not addresses:
                 raise JaroProfileError("WireGuard profile requires tunnel_address_cidr")
-            try:
-                ipaddress.ip_interface(self.tunnel_address_cidr.strip())
-            except ValueError as exc:
-                raise JaroProfileError(f"Invalid tunnel_address_cidr: {exc}") from exc
+            normalized_addresses: List[str] = []
+            for address in addresses:
+                try:
+                    normalized_addresses.append(str(ipaddress.ip_interface(address.strip())))
+                except ValueError as exc:
+                    raise JaroProfileError(f"Invalid tunnel address CIDR: {exc}") from exc
+            if len(set(normalized_addresses)) != len(normalized_addresses):
+                raise JaroProfileError("Duplicate WireGuard interface address")
+            self.tunnel_addresses_cidr = normalized_addresses
+            self.tunnel_address_cidr = normalized_addresses[0]
             if not self.peer_public_key_b64 or not _is_valid_wg_pubkey_b64(self.peer_public_key_b64):
                 raise JaroProfileError("WireGuard profile requires a valid 32-byte Base64 peer_public_key_b64")
+            normalized_dns: List[str] = []
+            for server in self.dns_servers:
+                try:
+                    normalized_dns.append(str(ipaddress.ip_address(server.strip())))
+                except ValueError as exc:
+                    raise JaroProfileError(f"Invalid DNS server IP address {server!r}") from exc
+            if len(set(normalized_dns)) != len(normalized_dns):
+                raise JaroProfileError("Duplicate WireGuard DNS server")
+            self.dns_servers = normalized_dns
+            if self.dns_servers and not self.dns_override_authorized:
+                raise JaroProfileError("WireGuard DNS override requires explicit dns_override_authorized consent")
+            if self.include_default_route:
+                families = {ipaddress.ip_interface(address).version for address in normalized_addresses}
+                if families != {4, 6}:
+                    raise JaroProfileError("Full tunnel requires both IPv4 and IPv6 interface addresses")
+                if not self.dns_servers or not self.dns_override_authorized:
+                    raise JaroProfileError("Full tunnel requires an explicitly authorized DNS server")
         elif self.protocol == "ssh_socks5":
+            if risky_routes or self.include_default_route or self.included_routes:
+                raise JaroProfileError("SSH/SOCKS5 is a TCP proxy and cannot install IP routes")
             if not self.ssh_username or not self.ssh_username.strip():
                 raise JaroProfileError("SSH profile requires ssh_username")
             if not self.pinned_hostkey_sha256 or not self.pinned_hostkey_sha256.startswith("SHA256:"):
@@ -187,8 +225,11 @@ class JaroTunnelProfile:
             "wireguard": (
                 {
                     "tunnel_address_cidr": self.tunnel_address_cidr,
+                    "tunnel_addresses_cidr": list(self.tunnel_addresses_cidr),
                     "peer_public_key_b64": self.peer_public_key_b64,
                     "persistent_keepalive_s": self.persistent_keepalive_s,
+                    "dns_servers": list(self.dns_servers),
+                    "dns_override_authorized": bool(self.dns_override_authorized),
                 }
                 if self.protocol == "wireguard"
                 else None
@@ -242,8 +283,11 @@ class JaroTunnelProfile:
             included_routes=list(data.get("included_routes") or []),
             mtu=int(data.get("mtu", 1420)),
             tunnel_address_cidr=wg_block.get("tunnel_address_cidr"),
+            tunnel_addresses_cidr=list(wg_block.get("tunnel_addresses_cidr") or []),
             peer_public_key_b64=wg_block.get("peer_public_key_b64"),
             persistent_keepalive_s=wg_block.get("persistent_keepalive_s"),
+            dns_servers=list(wg_block.get("dns_servers") or []),
+            dns_override_authorized=bool(wg_block.get("dns_override_authorized", False)),
             keychain_secret_ref=str(crypto.get("keychain_secret_ref", "")),
             keychain_psk_ref=crypto.get("keychain_psk_ref"),
             ssh_username=ssh_block.get("username"),
@@ -344,6 +388,7 @@ class JaroProfileManager:
         vault_dir: Path,
         authorized: bool = False,
         allow_global_routes: bool = False,
+        allow_dns_override: bool = False,
         persist: bool = False,
     ) -> JaroTunnelProfile:
         """Safely imports a WireGuard `.conf`, isolating secrets into a `0o600` vault file and returning a secret-free profile."""
@@ -351,7 +396,7 @@ class JaroProfileManager:
         val = validate_wireguard_config_text(
             conf_text,
             allow_global_routes=allow_global_routes,
-            allow_dns_override=False,
+            allow_dns_override=allow_dns_override,
         )
         if not val["valid"]:
             raise JaroProfileError(redact_secrets(str(val["error"])))
@@ -369,7 +414,8 @@ class JaroProfileManager:
         iface_map = {k.lower(): v.strip() for k, v in parser.items(iface_sec)}
         peer_map = {k.lower(): v.strip() for k, v in parser.items(peer_sec)}
 
-        address_first = iface_map["address"].split(",")[0].strip()
+        addresses = list(val["addresses"])
+        address_first = addresses[0]
         mtu_val = int(iface_map.get("mtu", "1420"))
         pub_key = peer_map["publickey"]
         has_psk = "presharedkey" in peer_map
@@ -385,6 +431,7 @@ class JaroProfileManager:
 
         allowed_ips = [c.strip() for c in peer_map["allowedips"].split(",") if c.strip()]
         keepalive = int(peer_map["persistentkeepalive"]) if "persistentkeepalive" in peer_map else None
+        dns_servers = list(val["dns_servers"])
 
         # Write full secret .conf ONLY to owner-protected 0o600 vault file, never into `.jaroprofile` JSON!
         vault_path = Path(vault_dir)
@@ -410,8 +457,11 @@ class JaroProfileManager:
             included_routes=allowed_ips,
             mtu=mtu_val,
             tunnel_address_cidr=address_first,
+            tunnel_addresses_cidr=addresses,
             peer_public_key_b64=pub_key,
             persistent_keepalive_s=keepalive,
+            dns_servers=dns_servers,
+            dns_override_authorized=bool(dns_servers and allow_dns_override),
             keychain_secret_ref=keychain_ref,
             keychain_psk_ref=psk_ref,
             local_secret_file=str(secret_conf_file),

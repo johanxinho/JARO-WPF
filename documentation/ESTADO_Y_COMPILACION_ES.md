@@ -5,6 +5,8 @@ Rama de trabajo: `fix/jaro-functional-hardening`
 
 La auditoría específica de lifecycle iOS, `packetFlow`, WireGuardKit, SSH, DNS, App Groups y firma está en [FASE2_IOS_PACKET_TUNNEL_AUDITORIA_ES.md](FASE2_IOS_PACKET_TUNNEL_AUDITORIA_ES.md).
 
+La fase 3 implementa conservación de `DNS=`, validación/consentimiento de full tunnel con `includeAllNetworks`, diagnósticos por peer y una receta de laboratorio sin credenciales en [FASE3_DNS_WIREGUARD_LAB_IOS_ES.md](FASE3_DNS_WIREGUARD_LAB_IOS_ES.md). El código y CI no prueban aún un peer del usuario ni ejecución en iPhone.
+
 ## Alcance
 
 Esta rama corrige fallos de seguridad y de verificación observados durante la auditoría del repositorio. No declara conectividad remota disponible ni inventa endpoints: `configs/servers.json` debe seguir vacío hasta que el usuario registre servidores y credenciales propios. Las pruebas locales descritas abajo usan exclusivamente loopback, claves temporales y servidores efímeros.
@@ -16,6 +18,7 @@ Esta rama corrige fallos de seguridad y de verificación observados durante la a
 - **SOCKS5 / HTTP CONNECT:** los sockets de datos dejan de heredar el timeout corto de negociación; CONNECT reenvía bytes que lleguen junto con la cabecera, valida la autoridad y los puertos y devuelve una dirección de enlace SOCKS5 tomada del socket upstream. Los streams activos se cierran al detener el puente. Se añadió una prueba local de stream ocioso y teardown.
 - **Claves y confianza SSH:** no se cambian permisos a través de symlinks. `known_hosts` también se rechaza si terceros pueden modificar el archivo o su directorio padre. Windows deja de responder «protegido» con una ACL supuesta: requiere inspección real y falla cerrado ante cuentas no permitidas o herramientas de auditoría ausentes.
 - **WireGuard/Linux:** la activación requiere autorización de mutación de interfaz y, por separado, de rutas; las capturas incompletas de IPv4/IPv6 no prueban aislamiento. El laboratorio usa nombres de interfaz/namespace únicos y solo limpia recursos creados por su ejecución.
+- **WireGuard iOS fase 3:** `DNS=` ahora atraviesa importación y serialización hasta WireGuardKit. Full tunnel requiere consentimiento explícito, direcciones y rutas dual-stack y DNS autorizado; iOS recibe `includeAllNetworks` solo para esos perfiles. Apple documenta excepciones obligatorias del sistema, por lo que no se declara cobertura absoluta de cada paquete ni se afirma un túnel conectado sin handshake/deltas reales.
 - **iOS:** el alta SSH ya no rellena una IP, usuario o fingerprint de ejemplo. SSH no se declara autenticado por tener únicamente un socket TCP abierto. La ruta IP de SSH está bloqueada mientras el Packet Tunnel no procese `packetFlow`; se conserva el proxy configurado sin instalar rutas que se descartarían.
 - **CI:** se añadió un job Ubuntu reproducible para `compileall` y toda la suite `unittest`. El workflow iOS valida el `Info.plist` de la extensión en vez de repararlo silenciosamente, fija WireGuardKit `1.0.16-27`, valida `libwg-go.a` y corrige en el checkout temporal dos incompatibilidades observadas con Xcode 16.4 (PackageDescription 5.3 y el header BSD). No se commitea ni se altera el repositorio upstream. Los IPA generados siguen siendo **sin firma**.
 

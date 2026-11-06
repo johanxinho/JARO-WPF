@@ -17,6 +17,10 @@ public struct JaroMainView: View {
     @State private var wgProfileIdInput = ""
     @State private var wgDisplayNameInput = ""
     @State private var wgConfTextInput = ""
+    @State private var allowDNSOverride = false
+    @State private var allowFullTunnel = false
+    @State private var httpsProbeURL = ""
+    @State private var dnsQueryName = ""
 
     public init(viewModel: JaroDashboardViewModel) {
         self.viewModel = viewModel
@@ -121,15 +125,33 @@ public struct JaroMainView: View {
             LabeledContent("Proxy Local (SOCKS5 + CONNECT)", value: viewModel.capabilityMatrix.localProxyListening ? "ACTIVO" : "INACTIVO")
             LabeledContent("Sesión SSHv2 (Clave + SHA256)", value: viewModel.capabilityMatrix.sshAuthenticatedSession ? "VERIFICADA" : "NO")
             LabeledContent("Handshake WireGuard", value: viewModel.capabilityMatrix.wireguardHandshake ? "VERIFICADO" : "NO")
+            LabeledContent("DNS del perfil", value: viewModel.capabilityMatrix.wireguardDNSConfigured ? "CONFIGURADO" : "NO")
+            LabeledContent("Resolución DNS", value: viewModel.capabilityMatrix.wireguardDNSResolutionVerified ? "RESPUESTA OBSERVADA" : "NO VERIFICADA")
+            LabeledContent(
+                "Delta del peer WireGuard",
+                value: "RX +\(viewModel.capabilityMatrix.wireguardRXDeltaBytes) B / TX +\(viewModel.capabilityMatrix.wireguardTXDeltaBytes) B"
+            )
             LabeledContent(
                 "Salida HTTPS por Túnel",
                 value: (viewModel.capabilityMatrix.sshVerifiedHTTPS || viewModel.capabilityMatrix.wireguardVerifiedHTTPS)
                     ? "VERIFICADA" : "PENDIENTE"
             )
             #if canImport(NetworkExtension)
+            TextField("URL HTTPS propia (https://IP literal con ruta AllowedIPs)", text: $httpsProbeURL)
+                .jaroNoAutoCase()
             Button("Verificar Salida HTTPS Real por el Túnel") {
-                Task { await viewModel.requestExtensionHTTPSVerification() }
+                Task { await viewModel.requestExtensionHTTPSVerification(probeURLString: httpsProbeURL) }
             }
+            .disabled(httpsProbeURL.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            TextField("Nombre DNS propio/autorizado para consultar", text: $dnsQueryName)
+                .jaroNoAutoCase()
+            Button("Probar resolución DNS configurada") {
+                Task { await viewModel.requestExtensionDNSVerification(queryName: dnsQueryName) }
+            }
+            .disabled(dnsQueryName.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Text("La consulta DNS usa el resolver de iOS tras instalar los ajustes del túnel. Una respuesta no demuestra por sí sola ausencia de fugas. La prueba HTTPS de WireGuard exige IP literal cubierta por AllowedIPs y deltas RX/TX del peer.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
             #endif
         }
     }
@@ -166,6 +188,13 @@ public struct JaroMainView: View {
                 TextEditor(text: $wgConfTextInput)
                     .frame(minHeight: 180)
                     .font(.caption.monospaced())
+                Section("Consentimiento explícito") {
+                    Toggle("Autorizar DNS= del perfil (cambia el DNS del sistema)", isOn: $allowDNSOverride)
+                    Toggle("Autorizar full tunnel dual-stack (0.0.0.0/0 + ::/0 e includeAllNetworks de iOS)", isOn: $allowFullTunnel)
+                    Text("Full tunnel requiere ambas rutas por defecto, direcciones IPv4 e IPv6 y consentimiento DNS. Al aceptarlo, iOS enruta la mayoría del tráfico por la VPN y descarta tráfico mientras el proveedor no está Connected; Apple conserva excepciones de control de red, portal cautivo, ciertos servicios celulares y dispositivos complementarios. No es una garantía de que cada paquete del sistema quede dentro del túnel.")
+                        .font(.caption)
+                        .foregroundStyle(.secondary)
+                }
             }
             .navigationTitle("Importar WireGuard .conf")
             .toolbar {
@@ -178,9 +207,13 @@ public struct JaroMainView: View {
                             profileId: wgProfileIdInput,
                             displayName: wgDisplayNameInput.isEmpty ? wgProfileIdInput : wgDisplayNameInput,
                             confText: wgConfTextInput,
-                            authorized: true
+                            authorized: true,
+                            allowDNSOverride: allowDNSOverride,
+                            allowFullTunnel: allowFullTunnel
                         )
                         wgConfTextInput = ""
+                        allowDNSOverride = false
+                        allowFullTunnel = false
                         showingImportSheet = false
                     }
                     .disabled(wgProfileIdInput.isEmpty || wgConfTextInput.isEmpty)

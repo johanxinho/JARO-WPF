@@ -139,7 +139,9 @@ public final class JaroDashboardViewModel: ObservableObject {
         profileId: String,
         displayName: String,
         confText: String,
-        authorized: Bool
+        authorized: Bool,
+        allowDNSOverride: Bool,
+        allowFullTunnel: Bool
     ) {
         do {
             let imported = try profileManager.importWireGuardConf(
@@ -147,7 +149,8 @@ public final class JaroDashboardViewModel: ObservableObject {
                 displayName: displayName,
                 confText: confText,
                 authorized: authorized,
-                allowGlobalRoutes: false,
+                allowGlobalRoutes: allowFullTunnel,
+                allowDNSOverride: allowDNSOverride,
                 persist: true
             )
             selectedProfileId = imported.profileId
@@ -189,9 +192,14 @@ public final class JaroDashboardViewModel: ObservableObject {
             let proto = NETunnelProviderProtocol()
             proto.providerBundleIdentifier = JaroConstants.packetTunnelBundleIdentifier
             proto.serverAddress = "\(profile.host):\(profile.port)"
+            // Apple routes most traffic through this VPN and drops it while the provider is not Connected.
+            // Enable only after the profile was imported with explicit full-tunnel consent.
+            proto.includeAllNetworks = profile.includeDefaultRoute
             var providerConfiguration: [String: Any] = [
                 "jaro_profile_json": jsonString,
                 "allow_expensive_paths": allowExpensivePaths,
+                "allow_global_routes": profile.includeDefaultRoute,
+                "allow_dns_override": profile.wireguard?.dnsOverrideAuthorized == true,
             ]
             if userMarkedMetered {
                 providerConfiguration["user_marked_metered"] = true
@@ -281,7 +289,7 @@ public final class JaroDashboardViewModel: ObservableObject {
         return proto.providerBundleIdentifier == JaroConstants.packetTunnelBundleIdentifier
     }
 
-    public func requestExtensionHTTPSVerification(probeURLString: String = "https://example.com") async {
+    public func requestExtensionHTTPSVerification(probeURLString: String) async {
         guard let managers = try? await NETunnelProviderManager.loadAllFromPreferences(),
               let manager = managers.first(where: Self.isJaroPacketTunnelManager),
               let session = manager.connection as? NETunnelProviderSession else {
@@ -309,6 +317,33 @@ public final class JaroDashboardViewModel: ObservableObject {
             return
         }
         applyIPCResponse(decoded)
+    }
+
+    public func requestExtensionDNSVerification(queryName: String) async {
+        guard let managers = try? await NETunnelProviderManager.loadAllFromPreferences(),
+              let manager = managers.first(where: Self.isJaroPacketTunnelManager),
+              let session = manager.connection as? NETunnelProviderSession else {
+            statusBannerMessage = "No hay una extensión JARO activa para verificar DNS."
+            return
+        }
+        let request = JaroTunnelIPCRequest(command: .verifyDNSResolution, dnsQueryName: queryName)
+        guard let payload = try? JSONEncoder().encode(request) else {
+            statusBannerMessage = "No se pudo codificar la solicitud de diagnóstico DNS."
+            return
+        }
+        let responseData = await withCheckedContinuation { (continuation: CheckedContinuation<Data?, Never>) in
+            do {
+                try session.sendProviderMessage(payload) { data in continuation.resume(returning: data) }
+            } catch {
+                continuation.resume(returning: nil)
+            }
+        }
+        guard let responseData,
+              let response = try? JSONDecoder().decode(JaroTunnelIPCResponse.self, from: responseData) else {
+            statusBannerMessage = "La extensión JARO no respondió al diagnóstico DNS; no se informa éxito."
+            return
+        }
+        applyIPCResponse(response)
     }
 
     private func pollExtensionSnapshot(using manager: NETunnelProviderManager) async {

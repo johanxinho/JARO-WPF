@@ -14,6 +14,9 @@ import JaroDiagnostics
 import JaroProfiles
 import JaroSecurity
 import JaroTunnelEngine
+#if canImport(Network)
+import Network
+#endif
 #if canImport(NetworkExtension)
 import NetworkExtension
 #endif
@@ -38,6 +41,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
         cooldownSeconds: 60.0
     )
     private let httpsDiagnostic = JaroHTTPSEgressDiagnostic(maxProbeBytes: 6144)
+    private let dnsDiagnostic = JaroDNSResolutionDiagnostic()
 
     private lazy var wireGuardEngine = JaroWireGuardEngine(logBuffer: logBuffer)
     private lazy var sshEngine = JaroNativeSSHEngine(logBuffer: logBuffer)
@@ -99,7 +103,12 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
         let profileManager = JaroProfileManager(secretStore: secretStore)
         let profile: JaroPortableProfile
         do {
-            profile = try profileManager.importPortableJSON(profileData, persist: false)
+            profile = try profileManager.importPortableJSON(
+                profileData,
+                persist: false,
+                allowGlobalRoutes: (providerConfig["allow_global_routes"] as? Bool) == true,
+                allowDNSOverride: (providerConfig["allow_dns_override"] as? Bool) == true
+            )
             guard profile.authorized else {
                 throw JaroProfileValidationError.invalidProfileIdentifier(
                     "Profile '\(profile.profileId)' is not marked authorized=true"
@@ -209,6 +218,13 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
                 }
                 let resp = await buildIPCResponse()
                 completionHandler(try? JSONEncoder().encode(resp))
+
+            case .verifyDNSResolution:
+                if let queryName = req.dnsQueryName {
+                    await runDNSResolutionVerification(queryName: queryName)
+                }
+                let resp = await buildIPCResponse()
+                completionHandler(try? JSONEncoder().encode(resp))
             }
         }
     }
@@ -223,14 +239,15 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
                 secretStore: secretStore,
                 packetTunnelProvider: self
             )
-            let wgStats = await wireGuardEngine.fetchRuntimeStats()
+            let wgStats = await wireGuardEngine.fetchRuntimeStats(peerPublicKeyB64: profile.wireguard?.peerPublicKeyB64)
             stateLock.lock()
-            capabilities.wireguardHandshake = (wgStats.lastHandshakeEpochSec ?? 0) > 0
-            capabilities.wireguardBidirectionalTransfer = wgStats.hasBidirectionalTransfer
+            capabilities.wireguardHandshake = wgStats.hasFreshHandshake
+            capabilities.wireguardBidirectionalTransfer = false
+            capabilities.wireguardDNSConfigured = !(profile.wireguard?.dnsServers ?? []).isEmpty
             stateLock.unlock()
             transitionState(
-                capabilities.wireguardHandshake ? .connectedHandshakeOnly : .unverified,
-                error: capabilities.wireguardHandshake ? nil : "WireGuard started but no handshake has been observed yet"
+                wgStats.hasFreshHandshake ? .connectedHandshakeOnly : .unverified,
+                error: wgStats.hasFreshHandshake ? nil : "WireGuard adapter started; no fresh handshake from the configured peer has been observed"
             )
 
         case .sshSocks5:
@@ -297,12 +314,34 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
         stateLock.unlock()
         guard let profile = prof else { return }
 
+        let beforeStats: JaroTrafficStats?
+        if profile.tunnelProtocol == .wireguard {
+            guard let wg = profile.wireguard,
+                  let host = probeURL.host,
+                  Self.addressIsCovered(host, by: profile.includedRoutes) else {
+                stateLock.lock()
+                capabilities.wireguardVerifiedHTTPS = false
+                stateLock.unlock()
+                transitionState(.unverified, error: "WireGuard HTTPS probe must use an IP literal covered by this peer's AllowedIPs")
+                return
+            }
+            beforeStats = await wireGuardEngine.fetchRuntimeStats(peerPublicKeyB64: wg.peerPublicKeyB64)
+        } else {
+            beforeStats = nil
+        }
+
         let proxyPort = (profile.tunnelProtocol == .sshSocks5) ? localSOCKS5Server.boundPort : nil
         let result = await httpsDiagnostic.verifyHTTPSEgress(
             url: probeURL,
             expectedStatus: 200,
             localHTTPConnectProxyPort: proxyPort
         )
+        let afterStats: JaroTrafficStats?
+        if profile.tunnelProtocol == .wireguard {
+            afterStats = await wireGuardEngine.fetchRuntimeStats(peerPublicKeyB64: profile.wireguard?.peerPublicKeyB64)
+        } else {
+            afterStats = nil
+        }
 
         stateLock.lock()
         capabilities.captivePortalDetected = result.captivePortalSuspected
@@ -311,15 +350,108 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
             capabilities.localProxyListening = localSOCKS5Server.isListening
             capabilities.sshVerifiedHTTPS = result.httpsVerified
         } else {
-            capabilities.wireguardVerifiedHTTPS = result.httpsVerified
+            let rxAfter = afterStats?.rxBytes ?? 0
+            let rxBefore = beforeStats?.rxBytes ?? 0
+            let txAfter = afterStats?.txBytes ?? 0
+            let txBefore = beforeStats?.txBytes ?? 0
+            let rxDelta = rxAfter >= rxBefore ? rxAfter - rxBefore : 0
+            let txDelta = txAfter >= txBefore ? txAfter - txBefore : 0
+            capabilities.wireguardHandshake = afterStats?.hasFreshHandshake == true
+            capabilities.wireguardRXDeltaBytes = rxDelta
+            capabilities.wireguardTXDeltaBytes = txDelta
+            capabilities.wireguardBidirectionalTransfer = rxDelta > 0 && txDelta > 0
+            capabilities.wireguardVerifiedHTTPS = result.httpsVerified &&
+                afterStats?.hasFreshHandshake == true && rxDelta > 0 && txDelta > 0
         }
+        let wgVerified = capabilities.wireguardVerifiedHTTPS
+        let wgHandshake = capabilities.wireguardHandshake
         stateLock.unlock()
 
-        if result.httpsVerified {
+        if profile.tunnelProtocol == .wireguard {
+            if wgVerified {
+                transitionState(.connectedVerifiedHTTPS, error: nil)
+            } else if wgHandshake {
+                transitionState(.connectedHandshakeOnly, error: "HTTPS response, fresh peer handshake, and bidirectional peer-counter deltas are all required for verification")
+            } else {
+                transitionState(.unverified, error: result.errorDescription ?? "No fresh handshake and bidirectional data evidence from the selected WireGuard peer")
+            }
+        } else if result.httpsVerified {
             transitionState(.connectedVerifiedHTTPS, error: nil)
         } else if let err = result.errorDescription {
             logBuffer.append(level: "WARN", component: "PacketTunnelProvider", message: "HTTPS probe failed: \(err)")
         }
+    }
+
+    private func runDNSResolutionVerification(queryName: String) async {
+        stateLock.lock()
+        let profile = activeProfile
+        stateLock.unlock()
+        guard let profile, profile.tunnelProtocol == .wireguard,
+              let wg = profile.wireguard,
+              wg.dnsOverrideAuthorized == true,
+              let servers = wg.dnsServers, !servers.isEmpty else {
+            stateLock.lock()
+            capabilities.wireguardDNSConfigured = false
+            capabilities.wireguardDNSResolutionVerified = false
+            stateLock.unlock()
+            transitionState(.unverified, error: "DNS verification requires an authorized WireGuard DNS server in the active profile")
+            return
+        }
+        guard servers.allSatisfy({ Self.addressIsCovered($0, by: profile.includedRoutes) }) else {
+            stateLock.lock()
+            capabilities.wireguardDNSResolutionVerified = false
+            stateLock.unlock()
+            transitionState(.unverified, error: "At least one configured DNS server is outside AllowedIPs; refusing a possible physical-path DNS query")
+            return
+        }
+        let before = await wireGuardEngine.fetchRuntimeStats(peerPublicKeyB64: wg.peerPublicKeyB64)
+        let result = await dnsDiagnostic.resolve(queryName: queryName, configuredServers: servers)
+        let after = await wireGuardEngine.fetchRuntimeStats(peerPublicKeyB64: wg.peerPublicKeyB64)
+        let rxDelta = after.rxBytes >= before.rxBytes ? after.rxBytes - before.rxBytes : 0
+        let txDelta = after.txBytes >= before.txBytes ? after.txBytes - before.txBytes : 0
+        let dnsEvidence = result.succeeded && after.hasFreshHandshake && rxDelta > 0 && txDelta > 0
+        stateLock.lock()
+        capabilities.wireguardDNSConfigured = true
+        capabilities.wireguardDNSResolutionVerified = dnsEvidence
+        capabilities.wireguardHandshake = after.hasFreshHandshake
+        capabilities.wireguardRXDeltaBytes = rxDelta
+        capabilities.wireguardTXDeltaBytes = txDelta
+        capabilities.wireguardBidirectionalTransfer = rxDelta > 0 && txDelta > 0
+        stateLock.unlock()
+        if !dnsEvidence {
+            let reason = result.errorDescription ?? "System resolver returned/cached a result without fresh bidirectional peer-counter evidence"
+            transitionState(after.hasFreshHandshake ? .connectedHandshakeOnly : .unverified, error: reason)
+        } else {
+            transitionState(.connectedHandshakeOnly, error: nil)
+            logBuffer.append(level: "INFO", component: "DNS diagnostic", message: "System resolver returned a result and the configured peer counters changed RX/TX; this does not prove absence of DNS leaks")
+        }
+    }
+
+    private static func addressIsCovered(_ address: String, by routes: [String]) -> Bool {
+        guard let target = addressBytes(address) else { return false }
+        for route in routes {
+            let parts = route.split(separator: "/")
+            guard parts.count == 2, let prefix = Int(parts[1]),
+                  let network = addressBytes(String(parts[0])),
+                  network.family == target.family, (0...target.bytes.count * 8).contains(prefix) else { continue }
+            var matches = true
+            for index in target.bytes.indices {
+                let bits = min(8, max(0, prefix - index * 8))
+                let mask: UInt8 = bits == 0 ? 0 : UInt8.max << (8 - bits)
+                if (target.bytes[index] & mask) != (network.bytes[index] & mask) {
+                    matches = false
+                    break
+                }
+            }
+            if matches { return true }
+        }
+        return false
+    }
+
+    private static func addressBytes(_ address: String) -> (family: Int, bytes: [UInt8])? {
+        if let ipv4 = IPv4Address(address) { return (4, Array(ipv4.rawValue)) }
+        if let ipv6 = IPv6Address(address) { return (6, Array(ipv6.rawValue)) }
+        return nil
     }
 
     private func startNetworkPathObserver(for profile: JaroPortableProfile) {
@@ -439,12 +571,12 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
                             packetTunnelProvider: self
                         )
                     }
-                    let stats = await self.wireGuardEngine.fetchRuntimeStats()
+                    let stats = await self.wireGuardEngine.fetchRuntimeStats(peerPublicKeyB64: profile.wireguard?.peerPublicKeyB64)
                     self.stateLock.lock()
-                    self.capabilities.wireguardHandshake = (stats.lastHandshakeEpochSec ?? 0) > 0
-                    self.capabilities.wireguardBidirectionalTransfer = stats.hasBidirectionalTransfer
+                    self.capabilities.wireguardHandshake = stats.hasFreshHandshake
+                    self.capabilities.wireguardBidirectionalTransfer = false
                     self.stateLock.unlock()
-                    if (stats.lastHandshakeEpochSec ?? 0) > 0 {
+                    if stats.hasFreshHandshake {
                         self.backoff.recordSuccess()
                         self.transitionState(.connectedHandshakeOnly, error: nil)
                     } else {
@@ -493,10 +625,20 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
         stateLock.unlock()
 
         var stats: JaroTrafficStats
+        var responseState = st
         if prof?.tunnelProtocol == .wireguard {
-            stats = await wireGuardEngine.fetchRuntimeStats()
-            caps.wireguardHandshake = (stats.lastHandshakeEpochSec ?? 0) > 0
-            caps.wireguardBidirectionalTransfer = stats.hasBidirectionalTransfer
+            stats = await wireGuardEngine.fetchRuntimeStats(peerPublicKeyB64: prof?.wireguard?.peerPublicKeyB64)
+            caps.wireguardHandshake = stats.hasFreshHandshake
+            caps.wireguardDNSConfigured = !(prof?.wireguard?.dnsServers ?? []).isEmpty
+            if !stats.hasFreshHandshake {
+                caps.wireguardBidirectionalTransfer = false
+                caps.wireguardVerifiedHTTPS = false
+                if st == .connectedHandshakeOnly || st == .connectedVerifiedHTTPS {
+                    responseState = .unverified
+                }
+            } else if st == .unverified {
+                responseState = .connectedHandshakeOnly
+            }
         } else {
             stats = localSOCKS5Server.trafficAccumulator.snapshot()
             caps.sshAuthenticatedSession = sshEngine.isSSHAuthenticated
@@ -505,7 +647,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
         stats.availableExtensionMemoryBytes = Self.queryAvailableExtensionMemoryBytes()
 
         return JaroTunnelIPCResponse(
-            state: st,
+            state: responseState,
             stats: stats,
             capabilities: caps,
             recentLogs: logBuffer.snapshot(limit: 40),

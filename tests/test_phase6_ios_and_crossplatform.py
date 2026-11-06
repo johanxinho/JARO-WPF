@@ -50,7 +50,7 @@ from core.protocols.ssh_engine import (
     SshTunnelConfig,
     probe_https_over_socks5,
 )
-from core.protocols.vpn_tunnel_engine import verify_route_isolation
+from core.protocols.vpn_tunnel_engine import validate_wireguard_config_text, verify_route_isolation
 from core.security.secret_guard import (
     PrivilegePolicyGate,
     SecretSecurityError,
@@ -93,6 +93,22 @@ def _strip_swift_comments_and_strings(source: str) -> str:
 
 
 class TestPhase6ProfilesAndSchemaParity(unittest.TestCase):
+    def test_ssh_profile_cannot_claim_ip_routes_or_full_tunnel(self) -> None:
+        for options in (
+            {"included_routes": ["10.77.0.0/24"]},
+            {"include_default_route": True},
+        ):
+            with self.assertRaises(JaroProfileError):
+                JaroTunnelProfile(
+                    profile_id="ssh-no-ip-routes",
+                    display_name="SSH proxy only",
+                    protocol="ssh_socks5",
+                    host="192.0.2.10",
+                    port=22,
+                    authorized=True,
+                    **options,
+                )
+
     def test_default_registries_empty_and_return_remote_server_required(self) -> None:
         mgr = JaroProfileManager()
         self.assertEqual(mgr.list_profiles(), [])
@@ -146,7 +162,8 @@ class TestPhase6ProfilesAndSchemaParity(unittest.TestCase):
             split_conf = (
                 f"[Interface]\n"
                 f"PrivateKey = {priv_b64}\n"
-                f"Address = 10.88.0.2/24\n"
+                f"Address = 10.88.0.2/24, fd88::2/64\n"
+                f"DNS = 10.88.0.1, fd88::1\n"
                 f"MTU = 1420\n\n"
                 f"[Peer]\n"
                 f"PublicKey = {peer_pub_b64}\n"
@@ -162,9 +179,13 @@ class TestPhase6ProfilesAndSchemaParity(unittest.TestCase):
                 vault_dir=vault_dir,
                 authorized=True,
                 allow_global_routes=False,
+                allow_dns_override=True,
                 persist=True,
             )
             self.assertFalse(prof.include_default_route)
+            self.assertEqual(prof.tunnel_addresses_cidr, ["10.88.0.2/24", "fd88::2/64"])
+            self.assertEqual(prof.dns_servers, ["10.88.0.1", "fd88::1"])
+            self.assertTrue(prof.dns_override_authorized)
             self.assertIsNotNone(prof.local_secret_file)
             vault_file = Path(prof.local_secret_file)  # type: ignore[arg-type]
             self.assertEqual(vault_file.stat().st_mode & 0o777, 0o600)
@@ -195,6 +216,8 @@ class TestPhase6ProfilesAndSchemaParity(unittest.TestCase):
             mgr2 = JaroProfileManager()
             reimported = mgr2.import_profile_file(ios_bundle_path)
             self.assertEqual(reimported.profile_id, "wg-authorized-split")
+            self.assertEqual(reimported.dns_servers, ["10.88.0.1", "fd88::1"])
+            self.assertEqual(reimported.tunnel_addresses_cidr, ["10.88.0.2/24", "fd88::2/64"])
             self.assertEqual(mgr2.evaluate_remote_status("wireguard")["status"], ServerStatus.UNVERIFIED.value)
 
             tampered = dict(exported_dict)
@@ -203,6 +226,65 @@ class TestPhase6ProfilesAndSchemaParity(unittest.TestCase):
             }
             with self.assertRaises(SecretSecurityError):
                 JaroTunnelProfile.from_portable_dict(tampered)
+
+
+    def test_wireguard_dns_mtu_incomplete_profiles_and_full_tunnel_policy(self) -> None:
+        private_key, _ = generate_ephemeral_wg_keypair()
+        _, peer_key = generate_ephemeral_wg_keypair()
+
+        def make_conf(*, addresses: str, dns: str, mtu: str, routes: str, add_table: str = "") -> str:
+            return (
+                f"[Interface]\nPrivateKey = {private_key}\nAddress = {addresses}\n"
+                f"DNS = {dns}\nMTU = {mtu}\n{add_table}\n"
+                f"[Peer]\nPublicKey = {peer_key}\nEndpoint = 203.0.113.8:51820\nAllowedIPs = {routes}\n"
+            )
+
+        full = make_conf(
+            addresses="10.77.0.2/24, fd77::2/64",
+            dns="10.77.0.1, fd77::1",
+            mtu="1420",
+            routes="0.0.0.0/0, ::/0",
+        )
+        denied_dns = validate_wireguard_config_text(full, allow_global_routes=True, allow_dns_override=False)
+        self.assertFalse(denied_dns["valid"])
+        accepted = validate_wireguard_config_text(full, allow_global_routes=True, allow_dns_override=True)
+        self.assertTrue(accepted["valid"], accepted["error"])
+        self.assertEqual(accepted["dns_servers"], ["10.77.0.1", "fd77::1"])
+        with tempfile.TemporaryDirectory() as tmp:
+            root = Path(tmp)
+            manager = JaroProfileManager(storage_dir=root / "profiles")
+            with self.assertRaises(JaroProfileError):
+                manager.import_wireguard_conf_text(
+                    profile_id="wg-no-dns-consent", display_name="No DNS consent", conf_text=full,
+                    vault_dir=root / "vault", authorized=True, allow_global_routes=True,
+                    allow_dns_override=False,
+                )
+            profile = manager.import_wireguard_conf_text(
+                profile_id="wg-full-consented", display_name="Full consented", conf_text=full,
+                vault_dir=root / "vault", authorized=True, allow_global_routes=True,
+                allow_dns_override=True, persist=True,
+            )
+            self.assertTrue(profile.include_default_route)
+            self.assertTrue(profile.dns_override_authorized)
+            exported = json.loads(manager.export_profile_json(profile.profile_id))
+            self.assertEqual(exported["wireguard"]["dns_servers"], ["10.77.0.1", "fd77::1"])
+            reloaded = JaroProfileManager(storage_dir=root / "profiles").get_profile("wg-full-consented")
+            self.assertIsNotNone(reloaded)
+            assert reloaded is not None
+            self.assertTrue(reloaded.include_default_route)
+            self.assertEqual(reloaded.dns_servers, ["10.77.0.1", "fd77::1"])
+
+        cases = [
+            make_conf(addresses="", dns="10.77.0.1", mtu="1420", routes="10.77.0.0/24"),
+            make_conf(addresses="10.77.0.2/24, fd77::2/64", dns="resolver.invalid", mtu="1420", routes="10.77.0.0/24"),
+            make_conf(addresses="10.77.0.2/24, fd77::2/64", dns="10.77.0.1", mtu="9000", routes="10.77.0.0/24"),
+            make_conf(addresses="10.77.0.2/24, fd77::2/64", dns="10.77.0.1", mtu="1420", routes="0.0.0.0/1, 128.0.0.0/1, ::/0"),
+            make_conf(addresses="10.77.0.2/24", dns="10.77.0.1", mtu="1420", routes="0.0.0.0/0, ::/0"),
+            make_conf(addresses="10.77.0.2/24, fd77::2/64", dns="10.77.0.1", mtu="1420", routes="10.77.0.0/24", add_table="Table = off"),
+        ]
+        for config in cases:
+            result = validate_wireguard_config_text(config, allow_global_routes=True, allow_dns_override=True)
+            self.assertFalse(result["valid"], result)
 
 
 class TestPhase6DualProxyOverRealOpenSshLoopback(unittest.TestCase):
@@ -494,6 +576,16 @@ class TestPhase6NativeIOSSwiftProjectAudit(unittest.TestCase):
             )
             self.assertIn(DEFAULT_IOS_APP_GROUP, ent.get("com.apple.security.application-groups", []))
 
+        with (IOS_ROOT / "Config" / "JaroAppStandalone.entitlements").open("rb") as fp:
+            standalone_entitlements = plistlib.load(fp)
+        self.assertNotIn("com.apple.developer.networking.networkextension", standalone_entitlements)
+        self.assertIn(DEFAULT_IOS_APP_GROUP, standalone_entitlements.get("com.apple.security.application-groups", []))
+        xcodegen = (IOS_ROOT / "project.yml").read_text(encoding="utf-8")
+        self.assertIn("PRODUCT_BUNDLE_IDENTIFIER: com.jarocomplements.jarowpf", xcodegen)
+        self.assertIn("PRODUCT_BUNDLE_IDENTIFIER: com.jarocomplements.jarowpf.PacketTunnel", xcodegen)
+        self.assertIn("- target: JaroPacketTunnel\n        embed: true", xcodegen)
+        self.assertIn("PRODUCT_BUNDLE_IDENTIFIER: com.jarocomplements.jarowpf.standalone", xcodegen)
+
         with (IOS_ROOT / "Sources" / "JaroPacketTunnel" / "Info.plist").open("rb") as fp:
             ext_plist = plistlib.load(fp)
         self.assertEqual(
@@ -507,6 +599,10 @@ class TestPhase6NativeIOSSwiftProjectAudit(unittest.TestCase):
 
     def test_ios_packet_tunnel_and_keychain_contracts_fail_closed(self) -> None:
         provider = (IOS_ROOT / "Sources" / "JaroPacketTunnel" / "PacketTunnelProvider.swift").read_text(encoding="utf-8")
+        wg_engine = (IOS_ROOT / "Sources" / "JaroTunnelEngine" / "JaroWireGuardEngine.swift").read_text(encoding="utf-8")
+        profile_manager = (IOS_ROOT / "Sources" / "JaroProfiles" / "JaroProfileManager.swift").read_text(encoding="utf-8")
+        app_vm = (IOS_ROOT / "Sources" / "JaroApp" / "JaroDashboardViewModel.swift").read_text(encoding="utf-8")
+        diagnostics = (IOS_ROOT / "Sources" / "JaroDiagnostics" / "JaroTunnelDiagnostics.swift").read_text(encoding="utf-8")
         vault = (IOS_ROOT / "Sources" / "JaroSecurity" / "JaroKeychainVault.swift").read_text(encoding="utf-8")
         app_entitlements = (IOS_ROOT / "Config" / "JaroApp.entitlements").read_text(encoding="utf-8")
         tunnel_entitlements = (IOS_ROOT / "Config" / "JaroPacketTunnel.entitlements").read_text(encoding="utf-8")
@@ -522,6 +618,24 @@ class TestPhase6NativeIOSSwiftProjectAudit(unittest.TestCase):
         self.assertIn("suspendTunnelForUnsatisfiedPath()", provider)
         self.assertIn("await self.stopTransportsAndClearNetworkSettings()", provider)
         self.assertIn("try await setTunnelNetworkSettings(nil)", provider)
+
+        # WireGuardKit owns the packet data plane and receives DNS + all interface addresses.
+        self.assertIn("interfaceConfig.addresses = interfaceRanges", wg_engine)
+        self.assertIn("interfaceConfig.dns = try dnsAddresses.map", wg_engine)
+        self.assertIn("peerPublicKeyB64: String?", wg_engine)
+        self.assertIn("peerPublicKeyB64: profile.wireguard?.peerPublicKeyB64", provider)
+        self.assertIn("afterStats?.hasFreshHandshake == true && rxDelta > 0 && txDelta > 0", provider)
+        self.assertIn("addressIsCovered(host, by: profile.includedRoutes)", provider)
+        self.assertIn("dnsDiagnostic.resolve(queryName: queryName, configuredServers: servers)", provider)
+        self.assertIn("dnsResolutionSucceeded", diagnostics)
+        self.assertIn("getaddrinfo", diagnostics)
+        self.assertIn("not that no DNS packet escaped another path", diagnostics)
+        self.assertIn("allowDNSOverride: allowDNSOverride", app_vm)
+        self.assertIn("proto.includeAllNetworks = profile.includeDefaultRoute", app_vm)
+        self.assertNotIn('probeURLString: String = "https://example.com"', app_vm)
+        self.assertIn("DNS override requires explicit allowDNSOverride consent", profile_manager)
+        self.assertIn("JARO requires exactly one [Peer] section", profile_manager)
+        self.assertIn("canonical dual-stack pair", profile_manager)
 
         # The query uses the literal App Group; iOS Keychain enforces entitlement membership at runtime.
         self.assertIn("JaroKeychainAccessGroupResolver.resolve(", vault)
