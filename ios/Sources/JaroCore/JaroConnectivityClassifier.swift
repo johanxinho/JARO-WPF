@@ -235,7 +235,9 @@ public struct JaroConnectivityClassifier: Sendable {
     }
 
     private func httpsDimension(_ family: JaroNetworkFamily) -> (status: JaroHttpsStatus, evidence: [String]) {
-        let urls = config.httpsURLs.compactMap { URL(string: $0) }.filter { Self.familyOfURL($0) == family }
+        // Un nombre (no literal IP) no tiene familia: se prueba en ambas.
+        let urls = config.httpsURLs.compactMap { URL(string: $0) }
+            .filter { let f = Self.familyOfURL($0); return f == nil || f == family }
         guard !urls.isEmpty else { return (.notProbed, ["no_https_targets_configured"]) }
         var evidence: [String] = []
         var best = JaroHttpsStatus.destinationUnavailable
