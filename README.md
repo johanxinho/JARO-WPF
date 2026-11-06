@@ -31,3 +31,4 @@ with support for authorized free-access networks.
 - Los perfiles remotos deben configurarse con servidores propios/autorizados; el repositorio no incluye servidores ni credenciales de ejemplo.
 - La suite Python se ejecuta con `python3 -m pip install -r requirements-dev.txt` y `python3 -m unittest discover -s tests -v`.
 - Las limitaciones de iOS, firma de Packet Tunnel, artefactos sin firmar y estado de verificación se documentan en [ESTADO_Y_COMPILACION_ES.md](documentation/ESTADO_Y_COMPILACION_ES.md).
+- La segunda fase audita el ciclo de `NEPacketTunnelProvider`, WireGuardKit, SSH/SOCKS5, DNS, rutas, App Groups y la vía legítima de firma en [FASE2_IOS_PACKET_TUNNEL_AUDITORIA_ES.md](documentation/FASE2_IOS_PACKET_TUNNEL_AUDITORIA_ES.md).
