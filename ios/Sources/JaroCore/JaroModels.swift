@@ -351,6 +351,7 @@ public enum JaroTunnelIPCCommand: String, Codable, Sendable {
     case statusSnapshot = "status_snapshot"
     case verifyHTTPSEgress = "verify_https_egress"
     case verifyDNSResolution = "verify_dns_resolution"
+    case verifyUnderlyingNetwork = "verify_underlying_network"
     case recentLogs = "recent_logs"
 }
 
@@ -372,18 +373,23 @@ public struct JaroTunnelIPCResponse: Codable, Sendable {
     public let capabilities: JaroCapabilityMatrix
     public let recentLogs: [String]
     public let lastError: String?
+    /// Snapshot of the UNDERLYING network (Connectivity Classifier rev. 2).
+    /// Independent from the WireGuard handshake: reported separately.
+    public let underlyingNetwork: JaroClassifierResult?
 
     public init(
         state: JaroTunnelState,
         stats: JaroTrafficStats,
         capabilities: JaroCapabilityMatrix,
         recentLogs: [String],
-        lastError: String? = nil
+        lastError: String? = nil,
+        underlyingNetwork: JaroClassifierResult? = nil
     ) {
         self.state = state
         self.stats = stats
         self.capabilities = capabilities
         self.recentLogs = recentLogs
         self.lastError = lastError
+        self.underlyingNetwork = underlyingNetwork
     }
 }

@@ -42,6 +42,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
     )
     private let httpsDiagnostic = JaroHTTPSEgressDiagnostic(maxProbeBytes: 6144)
     private let dnsDiagnostic = JaroDNSResolutionDiagnostic()
+    private var lastUnderlyingNetwork: JaroClassifierResult?
 
     private lazy var wireGuardEngine = JaroWireGuardEngine(logBuffer: logBuffer)
     private lazy var sshEngine = JaroNativeSSHEngine(logBuffer: logBuffer)
@@ -223,6 +224,14 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
                 if let queryName = req.dnsQueryName {
                     await runDNSResolutionVerification(queryName: queryName)
                 }
+                let resp = await buildIPCResponse()
+                completionHandler(try? JSONEncoder().encode(resp))
+
+            case .verifyUnderlyingNetwork:
+                await runUnderlyingNetworkClassification(
+                    dnsQueryName: req.dnsQueryName,
+                    httpsURLString: req.probeURLString
+                )
                 let resp = await buildIPCResponse()
                 completionHandler(try? JSONEncoder().encode(resp))
             }
@@ -651,7 +660,40 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
             stats: stats,
             capabilities: caps,
             recentLogs: logBuffer.snapshot(limit: 40),
-            lastError: err
+            lastError: err,
+            underlyingNetwork: lastUnderlyingNetwork
+        )
+    }
+
+    // MARK: - Underlying Network Classification (Connectivity Classifier rev. 2)
+
+    private func runUnderlyingNetworkClassification(dnsQueryName: String?, httpsURLString: String?) async {
+        stateLock.lock()
+        let prof = activeProfile
+        let vpnState = currentState.rawValue
+        stateLock.unlock()
+
+        var config = JaroConnectivityProbeConfig()
+        // Resolvers: solo los servidores DNS configurados por el usuario en el perfil.
+        if let wg = prof?.wireguard, let servers = wg.dnsServers {
+            config.dnsResolvers = servers
+        }
+        config.dnsQueryName = dnsQueryName ?? ""
+        // Destino HTTPS: solo la URL que el usuario suministra en el pedido IPC.
+        if let s = httpsURLString, !s.isEmpty {
+            config.httpsURLs = [s]
+        }
+        // Sin portal_url por defecto: la heurística de portal no corre si el
+        // usuario no configura un destino (queda not_suspected/no_claim).
+        let classifier = JaroConnectivityClassifier(transport: JaroRealProbeTransport(), config: config)
+        let result = classifier.classify(vpnTunnelState: vpnState)
+        stateLock.lock()
+        lastUnderlyingNetwork = result
+        stateLock.unlock()
+        logBuffer.append(
+            level: "INFO",
+            component: "ConnectivityClassifier",
+            message: "underlying network: ipv4=\(result.ipv4.classification.rawValue) ipv6=\(result.ipv6.classification.rawValue) (vpn=\(vpnState))"
         )
     }
 
