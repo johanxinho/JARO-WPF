@@ -477,6 +477,9 @@ class TestPhase6NativeIOSSwiftProjectAudit(unittest.TestCase):
 
         self.assertTrue((IOS_ROOT / "Package.swift").is_file())
         self.assertTrue((IOS_ROOT / "project.yml").is_file())
+        package_source = (IOS_ROOT / "Package.swift").read_text(encoding="utf-8")
+        self.assertIn(".package(path: localWireGuardKitPath)", package_source)
+        self.assertIn('.package(url: wgURL, exact: "1.0.16-27")', package_source)
 
         # Validate Apple plist & entitlement XML syntax and required keys
         for ent_path in (
