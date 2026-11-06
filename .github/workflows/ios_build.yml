@@ -47,6 +47,19 @@ jobs:
           grep -qx '// swift-tools-version:5.3' /tmp/wireguard-apple/Package.swift
           sed -i '' '1s/swift-tools-version:5\.3/swift-tools-version:5.7/' /tmp/wireguard-apple/Package.swift
           grep -qx '// swift-tools-version:5.7' /tmp/wireguard-apple/Package.swift
+          # WireGuardKitC uses BSD u_int* types; Xcode 16.4 requires the defining Darwin header imported first.
+          python3 - <<'PY'
+          from pathlib import Path
+          header = Path("/tmp/wireguard-apple/Sources/WireGuardKitC/WireGuardKitC.h")
+          content = header.read_text(encoding="utf-8")
+          marker = '#include "key.h"\n'
+          if "#include <sys/types.h>" not in content:
+              if content.count(marker) != 1:
+                  raise SystemExit("Unexpected WireGuardKitC.h; cannot apply sys/types.h compatibility fix")
+              header.write_text(content.replace(marker, "#include <sys/types.h>\n" + marker, 1), encoding="utf-8")
+          if "#include <sys/types.h>" not in header.read_text(encoding="utf-8"):
+              raise SystemExit("sys/types.h compatibility include missing")
+          PY
           echo "Compiling WireGuardKitGo static archive libwg-go.a for iOS (arm64)..."
           make -C /tmp/wireguard-apple/Sources/WireGuardKitGo PLATFORM_NAME=iphoneos ARCHS=arm64 DESTDIR=/tmp/wireguard-apple/Sources/WireGuardKitGo/out build version-header
           test -s /tmp/wireguard-apple/Sources/WireGuardKitGo/out/libwg-go.a
