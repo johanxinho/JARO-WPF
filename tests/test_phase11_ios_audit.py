@@ -101,7 +101,7 @@ class WireGuardNetworkSettingsTests(unittest.TestCase):
 
 
 class ConnectivityClassifierIntegrationTests(unittest.TestCase):
-    CLASSIFIER = (IOS / "Sources" / "JaroDiagnostics" / "JaroConnectivityClassifier.swift").read_text()
+    CLASSIFIER = (IOS / "Sources" / "JaroCore" / "JaroConnectivityClassifier.swift").read_text()
     REAL = (IOS / "Sources" / "JaroDiagnostics" / "JaroRealProbeTransport.swift").read_text()
     MODELS = (IOS / "Sources" / "JaroCore" / "JaroModels.swift").read_text()
     PROVIDER = (IOS / "Sources" / "JaroPacketTunnel" / "PacketTunnelProvider.swift").read_text()
@@ -156,6 +156,7 @@ class ConnectivityClassifierIntegrationTests(unittest.TestCase):
             ("JaroRealProbeTransport.swift", self.REAL),
             ("PacketTunnelProvider.swift", self.PROVIDER),
             ("JaroConnectivityClassifierTests.swift", self.TESTS),
+            ("JaroModels.swift", self.MODELS),
         ):
             self.assertEqual(text.count("{"), text.count("}"), name)
 

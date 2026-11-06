@@ -9,6 +9,7 @@
 
 import Foundation
 import Network
+import JaroCore
 
 public struct JaroRealProbeTransport: JaroConnectivityProbeTransport {
     public init() {}

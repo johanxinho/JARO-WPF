@@ -3,6 +3,7 @@
 // classification logic, not real connectivity.
 
 import XCTest
+import JaroCore
 @testable import JaroDiagnostics
 
 final class MockProbeTransport: JaroConnectivityProbeTransport, @unchecked Sendable {
