@@ -5,8 +5,8 @@ Arquitectura objetivo: servidor WireGuard permanente en un VPS externo del usuar
 ## Estado de los entregables de esta fase
 
 - Toolkit VPS en `tools/vps/`: generador de configuraciones validado (`vps_wireguard_config.py`), aprovisionamiento idempotente (`provision_wireguard_server.sh`) y recolector de evidencia (`verify_vps_evidence.sh`).
-- 15 pruebas nuevas (`tests/test_phase10_vps_toolkit.py`): claves base64 de 44 caracteres, direcciones IPv4/IPv6 con bits de host, full tunnel canonical `0.0.0.0/0, ::/0` con DNS obligatorio, solapamientos, puertos, endpoint, y contratos estructurales (sin secretos en el repo, `set -euo pipefail`, filtro por peer en la evidencia).
-- Suite completa local: **91 pruebas OK** (76 previas + 15 nuevas).
+- 15 pruebas del generador (`tests/test_phase10_vps_toolkit.py`) y **9 pruebas de integración aislada del aprovisionamiento** (`tests/test_phase10_provision_integration.py`, entorno con binarios sustitutos y modo `--prefix`).
+- Suite completa local: **100 pruebas OK** (76 previas + 24 nuevas).
 
 ## 1. Comparativa de VPS gratuitos (verificado contra fuentes oficiales)
 
@@ -22,6 +22,21 @@ Notas honestas:
 - La fuente de Oracle (docs oficiales de Always Free, consultada hoy) mantiene A1 en 2 OCPU/12 GB equivalentes; artículos de terceros hablan de cambios en 2026, pero la documentación oficial citada arriba es la referencia aplicable. Verificar la pantalla de precios al crear la cuenta.
 - Oracle no garantiza disponibilidad de A1 en free tier (suele agotarse); los `E2.1.Micro` casi siempre se crean. Para WireGuard, un Micro alcanza de sobra para un iPhone.
 - Ninguna opción es verificablemente "permanente para siempre": Oracle reserva el derecho de cambiar condiciones. El reclaim por inactividad se mitiga con uso real del túnel (o un cron ligero de CPU, documentado más abajo).
+
+### Revisión correctiva del toolkit (post-auditoría del usuario)
+
+Defectos reproducibles corregidos en esta revisión:
+
+1. **Directorio del cliente**: `/root/jaro-wireguard/` (o `$PREFIX/root/jaro-wireguard/`) se crea con `mkdir -p` y `chmod 700` **antes** de escribir el perfil; el `.conf` queda 0600. Verificado por la prueba de integración.
+2. **Contrato del generador**: el instalador ya no invoca `client-conf` sin `--allowed-ips` ni `--full-tunnel`. Por defecto usa split tunnel (las subredes del túnel); `--full-tunnel` exige DNS válido. Cubierto por pruebas de integración split y full tunnel.
+3. **DNS honesto**: `--dns` **fallo cerrado** si no hay resolver: exige `--install-unbound` (instala y configura Unbound escuchando solo en las IPs del túnel, con `access-control` que rechaza el resto) o `--assume-dns-resolver` explícito. Unbound no se expone públicamente.
+4. **IPv6 honesto**: se genera `ip6tables MASQUERADE` y reglas `FORWARD` solo si se declara `--tunnel-ipv6`, con aviso explícito de que la salida IPv6 pública debe verificarse aparte; sin IPv6 no se anuncia dual-stack.
+5. **Claves fuera de argv/ps**: el generador acepta `--private-key-file` (archivo 0600 obligatorio; rechaza 0644) o `--private-key -` (stdin). El instalador pasa las claves solo por archivos 0600 en `/etc/wireguard/`. Las pruebas verifican que `argv` del proceso no contiene la clave y que los mensajes de error no la revelan.
+6. **SSH sin apertura global**: `--manage-firewall` ya no ejecuta `ufw allow 22/tcp`; SSH/22 solo se abre con `--ssh-source <cidr>` explícito, o queda bajo la Security List del proveedor. Verificado por prueba (el plan dry-run muestra la regla restringida y nunca la global).
+
+Hallazgos adicionales corregidos durante la revisión: el derivador de direcciones enumeraba `hosts()` de la subred IPv6 (/64 = 2^64 direcciones), colgando el proceso; ahora deriva primer/segundo host por aritmética (`tunnel-addresses`), y el instalador ya no usa heredocs ad hoc. `SCRIPT_DIR` se define antes de su primer uso. Se añadió modo `--prefix` para ejecutar el aprovisionamiento en un entorno aislado sin systemd real ni cambios de red.
+
+**Estado del toolkit: no declarado listo para producción** hasta completar la ejecución real en el VPS del usuario (sección 5 de evidencias, todos los estados PENDIENTE).
 
 ## 2. Qué hizo el agente y qué queda para el usuario (sin autorizaciones concedidas)
 

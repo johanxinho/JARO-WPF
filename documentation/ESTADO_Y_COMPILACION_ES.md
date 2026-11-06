@@ -7,7 +7,7 @@ La auditoría específica de lifecycle iOS, `packetFlow`, WireGuardKit, SSH, DNS
 
 La fase 3 implementa conservación de `DNS=`, validación/consentimiento de full tunnel con `includeAllNetworks`, diagnósticos por peer y una receta de laboratorio sin credenciales en [FASE3_DNS_WIREGUARD_LAB_IOS_ES.md](FASE3_DNS_WIREGUARD_LAB_IOS_ES.md). El código y CI no prueban aún un peer del usuario ni ejecución en iPhone.
 
-La fase 4 prepara el servidor permanente externo: toolkit VPS en `tools/vps/` (generador de configuraciones validado, aprovisionamiento idempotente y recolección de evidencia por peer) y comparativa de proveedores gratuitos en [FASE4_VPS_EXTERNO_WIREGUARD_ES.md](FASE4_VPS_EXTERNO_WIREGUARD_ES.md). La cuenta/instancia del VPS y la regla `UDP/51820` dependen del usuario; la conexión real con el iPhone sigue sin verificar y no se simula.
+La fase 4 prepara el servidor permanente externo: toolkit VPS en `tools/vps/` (generador de configuraciones validado, aprovisionamiento idempotente con modo de prueba aislada y recolección de evidencia por peer) y comparativa de proveedores gratuitos en [FASE4_VPS_EXTERNO_WIREGUARD_ES.md](FASE4_VPS_EXTERNO_WIREGUARD_ES.md). La cuenta/instancia del VPS y la regla `UDP/51820` dependen del usuario; la conexión real con el iPhone sigue sin verificar y no se simula.
 
 ## Alcance
 
@@ -34,7 +34,7 @@ python3 -m compileall -q core tests
 python3 -m unittest discover -s tests -v
 ```
 
-Resultado al cerrar la primera auditoría: **73 pruebas aprobadas**; la segunda fase elevó el total a **74**, la fase 3 a **76**, y la fase 4 añade 15 casos del toolkit VPS para un total actual de **91 pruebas Python aprobadas**. Incluyen QUIC/DoQ, DNS, coste/failover, seguridad, perfiles, Windows por contratos, SSH/OpenSSH loopback real, SOCKS5, HTTP CONNECT, HTTPS local y generador/approvisionamiento VPS. `git diff --check` también pasó. Los escenarios que usan fallos inyectados son explícitamente simulados; no cuentan como prueba de conectividad remota.
+Resultado al cerrar la primera auditoría: **73 pruebas aprobadas**; la segunda fase elevó el total a **74**, la fase 3 a **76**, y la fase 4 añade 24 casos (generador VPS + integración aislada del aprovisionamiento) para un total actual de **100 pruebas Python aprobadas**. Incluyen QUIC/DoQ, DNS, coste/failover, seguridad, perfiles, Windows por contratos, SSH/OpenSSH loopback real, SOCKS5, HTTP CONNECT, HTTPS local y generador/approvisionamiento VPS. `git diff --check` también pasó. Los escenarios que usan fallos inyectados o sustitutos son explícitamente simulados; no cuentan como prueba de conectividad remota ni de producción.
 
 En GitHub Actions, el commit `af03caf` pasó los tests Python y ambos jobs iOS en macOS/Xcode 16.4: `swift test`, generación de `libwg-go.a`, build Full, validación del PacketTunnel embebido, build Standalone y carga de ambos IPA. [Ver ejecución y artefactos del workflow](https://github.com/johanxinho/JARO-WPF/actions/runs/42135602853). Esta validación es de compilación/empaquetado, no de firma ni ejecución en un iPhone.
 

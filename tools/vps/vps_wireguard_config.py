@@ -21,6 +21,7 @@ from __future__ import annotations
 
 import argparse
 import ipaddress
+import os
 import re
 import sys
 
@@ -103,6 +104,19 @@ def validate_peer_key_pair(server_public: str, peer_public: str) -> None:
         raise ConfigError("La clave publica del peer no puede ser la del servidor")
 
 
+def _first_second_hosts(net: ipaddress._BaseNetwork) -> tuple:  # type: ignore[type-arg]
+    """Primer y segundo host de una red SIN enumerarla (IPv6 /64 tiene 2^64)."""
+    total = net.num_addresses
+    if total >= 4:
+        first = net.network_address + 1
+    elif total == 2:  # /127: ambos usables
+        first = net.network_address
+    else:  # /128 o /32: la propia direccion
+        first = net.network_address
+    second = first + 1 if total > 2 else None
+    return first, second
+
+
 def build_server_config(
     private_key: str,
     address_ipv4: str,
@@ -129,7 +143,17 @@ def build_server_config(
         "MTU = 1420",
         f"PostUp = iptables -t nat -A POSTROUTING -o {wan_interface} -j MASQUERADE",
         f"PostDown = iptables -t nat -D POSTROUTING -o {wan_interface} -j MASQUERADE",
+        "PostUp = iptables -A FORWARD -i %i -j ACCEPT; iptables -A FORWARD -o %i -j ACCEPT",
+        "PostDown = iptables -D FORWARD -i %i -j ACCEPT; iptables -D FORWARD -o %i -j ACCEPT",
     ]
+    if any(":" in a for a in addr):
+        # NAT66 solo si el VPS tiene ruta IPv6 publica; no implica salida IPv6.
+        lines.extend(
+            [
+                f"PostUp = ip6tables -t nat -A POSTROUTING -o {wan_interface} -j MASQUERADE",
+                f"PostDown = ip6tables -t nat -D POSTROUTING -o {wan_interface} -j MASQUERADE",
+            ]
+        )
     if peer_public_key:
         peer_public_key = _require_key(peer_public_key, "PublicKey del peer")
         _require_key(private_key, "PrivateKey del servidor")
@@ -208,7 +232,8 @@ def main(argv: list[str] | None = None) -> int:
     sub = parser.add_subparsers(dest="command", required=True)
 
     p_srv = sub.add_parser("server-conf", help="Generar wg0.conf del servidor")
-    p_srv.add_argument("--private-key", required=True)
+    p_srv.add_argument("--private-key")
+    p_srv.add_argument("--private-key-file", help="Archivo 0600 con la clave; evita exponerla en argv/ps")
     p_srv.add_argument("--address-ipv4", required=True)
     p_srv.add_argument("--address-ipv6")
     p_srv.add_argument("--listen-port", type=int, required=True)
@@ -218,7 +243,8 @@ def main(argv: list[str] | None = None) -> int:
     p_srv.add_argument("--peer-ipv6")
 
     p_cli = sub.add_parser("client-conf", help="Generar .conf del cliente (solo stdout)")
-    p_cli.add_argument("--private-key", required=True)
+    p_cli.add_argument("--private-key")
+    p_cli.add_argument("--private-key-file", help="Archivo 0600 con la clave; evita exponerla en argv/ps")
     p_cli.add_argument("--address-ipv4", required=True)
     p_cli.add_argument("--address-ipv6")
     p_cli.add_argument("--server-public-key", required=True)
@@ -228,7 +254,50 @@ def main(argv: list[str] | None = None) -> int:
     p_cli.add_argument("--full-tunnel", action="store_true")
     p_cli.add_argument("--allowed-ips", action="append", default=[])
 
+    p_addr = sub.add_parser(
+        "tunnel-addresses",
+        help="Derivar IPs servidor/cliente de una subred de tunel (salida KEY=value)",
+    )
+    p_addr.add_argument("--tunnel-ipv4", required=True)
+    p_addr.add_argument("--tunnel-ipv6")
+
     args = parser.parse_args(argv)
+    if args.command == "tunnel-addresses":
+        try:
+            net4 = ipaddress.ip_network(_validate_address(args.tunnel_ipv4, "tunnel-ipv4"), strict=False)
+            first4, second4 = _first_second_hosts(net4)
+            out = [f"SERVER_IPV4={first4}/{net4.prefixlen}"]
+            out.append(f"CLIENT_IPV4={second4}/32" if second4 else "CLIENT_IPV4=")
+            if args.tunnel_ipv6:
+                net6 = ipaddress.ip_network(_validate_address(args.tunnel_ipv6, "tunnel-ipv6"), strict=False)
+                first6, second6 = _first_second_hosts(net6)
+                out.append(f"SERVER_IPV6={first6}/{net6.prefixlen}")
+                out.append(f"CLIENT_IPV6={second6}/128" if second6 else "CLIENT_IPV6=")
+            else:
+                out.extend(["SERVER_IPV6=", "CLIENT_IPV6="])
+        except ConfigError as exc:
+            print(f"ERROR: {exc}", file=sys.stderr)
+            return 2
+        print("\n".join(out))
+        return 0
+    if args.command not in ("server-conf", "client-conf"):
+        print("ERROR: subcomando desconocido", file=sys.stderr)
+        return 2
+    if bool(args.private_key) == bool(args.private_key_file):
+        print("ERROR: usar exactamente uno de --private-key '-' (stdin) o --private-key-file", file=sys.stderr)
+        return 2
+    try:
+        if args.private_key == "-":
+            args.private_key = sys.stdin.readline().strip()
+        elif args.private_key_file:
+            mode = os.stat(args.private_key_file).st_mode & 0o777
+            if mode != 0o600:
+                raise ConfigError(f"{args.private_key_file} debe tener permisos 0600 (tiene {oct(mode)})")
+            with open(args.private_key_file, encoding="ascii") as fh:
+                args.private_key = fh.readline().strip()
+    except ConfigError as exc:
+        print(f"ERROR: {exc}", file=sys.stderr)
+        return 2
     try:
         if args.command == "server-conf":
             print(
