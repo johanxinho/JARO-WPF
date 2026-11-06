@@ -23,6 +23,7 @@ jobs:
         uses: actions/setup-go@v5
         with:
           go-version: '1.22'
+          cache: false
 
       - name: Verify macOS Swift & Xcode Toolchain
         run: |
@@ -39,8 +40,13 @@ jobs:
 
       - name: Pre-build WireGuardKitGo libwg-go.a
         run: |
-          echo "Cloning official wireguard-apple repository for WireGuardKitGo build..."
-          git clone --depth 1 https://git.zx2c4.com/wireguard-apple /tmp/wireguard-apple
+          echo "Cloning pinned official wireguard-apple 1.0.16-27 release..."
+          git clone --depth 1 --branch 1.0.16-27 https://git.zx2c4.com/wireguard-apple /tmp/wireguard-apple
+          test "$(git -C /tmp/wireguard-apple rev-parse HEAD)" = "2fec12a6e1f6e3460b6ee483aa00ad29cddadab1"
+          # This release uses .macOS(.v12)/.iOS(.v15), which require PackageDescription 5.5+.
+          grep -qx '// swift-tools-version:5.3' /tmp/wireguard-apple/Package.swift
+          sed -i '' '1s/swift-tools-version:5\.3/swift-tools-version:5.7/' /tmp/wireguard-apple/Package.swift
+          grep -qx '// swift-tools-version:5.7' /tmp/wireguard-apple/Package.swift
           echo "Compiling WireGuardKitGo static archive libwg-go.a for iOS (arm64)..."
           make -C /tmp/wireguard-apple/Sources/WireGuardKitGo PLATFORM_NAME=iphoneos ARCHS=arm64 DESTDIR=/tmp/wireguard-apple/Sources/WireGuardKitGo/out build version-header
           test -s /tmp/wireguard-apple/Sources/WireGuardKitGo/out/libwg-go.a
