@@ -259,7 +259,7 @@ public struct JaroConnectivityClassifier: Sendable {
         return (outcome.status, outcome.evidence)
     }
 
-    static func familyOfIP(_ value: String) -> JaroNetworkFamily? {
+    public static func familyOfIP(_ value: String) -> JaroNetworkFamily? {
         var addr = in6_addr()
         if value.contains(":") && inet_pton(AF_INET6, value, &addr) == 1 { return .ipv6 }
         var v4 = in_addr()
@@ -267,7 +267,7 @@ public struct JaroConnectivityClassifier: Sendable {
         return nil
     }
 
-    static func familyOfURL(_ url: URL) -> JaroNetworkFamily? {
+    public static func familyOfURL(_ url: URL) -> JaroNetworkFamily? {
         guard let host = url.host else { return nil }
         return familyOfIP(host)
     }
