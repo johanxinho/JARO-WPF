@@ -1,5 +1,5 @@
 // JARO WPF — Connectivity Classifier rev. 2 (iOS diagnostics)
-// Module: JaroDiagnostics
+// Module: JaroCore (shared by JaroDiagnostics, JaroPacketTunnel and JaroApp)
 //
 // Port of `core/classifier/` (Python rev. 2) to Swift:
 // - IPv4 and IPv6 are classified independently; a missing family never
@@ -52,7 +52,7 @@ public enum JaroFamilyClassification: String, Codable, Sendable {
     case noConnectivity = "no_connectivity"
 }
 
-public enum JaroNetworkFamily: String, CaseIterable, Sendable {
+public enum JaroNetworkFamily: String, Codable, CaseIterable, Sendable {
     case ipv4
     case ipv6
 }
