@@ -314,6 +314,20 @@ public final class JaroProfileManager: @unchecked Sendable {
                 "keychain_secret_ref must start with 'keychain://'"
             )
         }
+        let secretReference = try JaroKeychainReference(uri: profile.cryptoReferences.keychainSecretRef)
+        guard secretReference.accessGroup == JaroConstants.appGroupIdentifier else {
+            throw JaroProfileValidationError.invalidProfileIdentifier(
+                "Keychain reference must use the configured JARO App Group"
+            )
+        }
+        if let pskReferenceURI = profile.cryptoReferences.keychainPskRef {
+            let pskReference = try JaroKeychainReference(uri: pskReferenceURI)
+            guard pskReference.accessGroup == JaroConstants.appGroupIdentifier else {
+                throw JaroProfileValidationError.invalidProfileIdentifier(
+                    "WireGuard PSK reference must use the configured JARO App Group"
+                )
+            }
+        }
         for cidr in profile.includedRoutes where globalDefaultCIDRs.contains(cidr) && !profile.includeDefaultRoute {
             throw JaroProfileValidationError.unauthorizedGlobalDefaultRoute(cidr)
         }

@@ -48,7 +48,10 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
     private var currentState: JaroTunnelState = .disconnected
     private var capabilities = JaroCapabilityMatrix()
     private var lastErrorMessage: String?
+    private var startTask: Task<Void, Never>?
     private var reconnectTask: Task<Void, Never>?
+    private var pathSuspensionTask: Task<Void, Never>?
+    private var isStopping = false
     private var hasObservedInitialNetworkPath = false
 
     // MARK: - NEPacketTunnelProvider Lifecycle
@@ -110,21 +113,40 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
 
         stateLock.lock()
         self.activeProfile = profile
+        self.isStopping = false
         self.hasObservedInitialNetworkPath = false
         stateLock.unlock()
         transitionState(.connecting, error: nil)
 
-        Task {
+        let task = Task { [weak self] in
+            guard let self = self else {
+                completionHandler(CancellationError())
+                return
+            }
             do {
-                try await bringUpTunnel(for: profile)
-                startNetworkPathObserver(for: profile)
-                backoff.recordSuccess()
+                try await self.bringUpTunnel(for: profile)
+                try Task.checkCancellation()
+                self.stateLock.lock()
+                let stopping = self.isStopping
+                self.stateLock.unlock()
+                guard !stopping else { throw CancellationError() }
+                self.startNetworkPathObserver(for: profile)
+                self.backoff.recordSuccess()
                 completionHandler(nil)
             } catch {
-                transitionState(.failed, error: error.localizedDescription)
+                await self.stopTransportsAndClearNetworkSettings()
+                if !(error is CancellationError) {
+                    self.transitionState(.failed, error: error.localizedDescription)
+                }
                 completionHandler(error)
             }
+            self.stateLock.lock()
+            self.startTask = nil
+            self.stateLock.unlock()
         }
+        stateLock.lock()
+        self.startTask = task
+        stateLock.unlock()
     }
 
     public override func stopTunnel(
@@ -136,14 +158,26 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
             component: "PacketTunnelProvider",
             message: "Stopping JARO PacketTunnel (reason=\(reason.rawValue))"
         )
-        reconnectTask?.cancel()
+        stateLock.lock()
+        isStopping = true
+        let pendingStart = startTask
+        let pendingReconnect = reconnectTask
+        startTask = nil
         reconnectTask = nil
+        pathSuspensionTask = nil
+        stateLock.unlock()
+        pendingStart?.cancel()
+        pendingReconnect?.cancel()
         pathCostMonitor.stop()
 
-        Task {
-            try? await localSOCKS5Server.stop()
-            try? await sshEngine.disconnect()
-            try? await wireGuardEngine.stop()
+        Task { [weak self] in
+            guard let self = self else {
+                completionHandler()
+                return
+            }
+            if let pendingStart = pendingStart { await pendingStart.value }
+            if let pendingReconnect = pendingReconnect { await pendingReconnect.value }
+            await self.stopTransportsAndClearNetworkSettings()
             stateLock.lock()
             self.activeProfile = nil
             self.capabilities = JaroCapabilityMatrix()
@@ -292,9 +326,11 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
         pathCostMonitor.start { [weak self] costSnapshot, pathSatisfied in
             guard let self = self else { return }
             self.stateLock.lock()
+            let stopping = self.isStopping
             let isInitialObservation = !self.hasObservedInitialNetworkPath
             self.hasObservedInitialNetworkPath = true
             self.stateLock.unlock()
+            guard !stopping else { return }
 
             if !costSnapshot.satisfiesTunnelPolicy {
                 self.blockTunnelForCostPolicy(interfaceKind: costSnapshot.interfaceKind)
@@ -302,10 +338,7 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
             }
 
             guard pathSatisfied else {
-                self.stateLock.lock()
-                self.capabilities = JaroCapabilityMatrix()
-                self.stateLock.unlock()
-                self.transitionState(.reconnecting, error: "Network path is not satisfied; tunnel traffic is unverified")
+                self.suspendTunnelForUnsatisfiedPath()
                 return
             }
             // NWPathMonitor reports the current path once after start; only later updates are roaming/recovery events.
@@ -315,13 +348,15 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
     }
 
     private func blockTunnelForCostPolicy(interfaceKind: String) {
-        reconnectTask?.cancel()
-        reconnectTask = nil
         stateLock.lock()
+        let pendingReconnect = reconnectTask
+        reconnectTask = nil
         let alreadyBlocked = currentState == .blockedByCostPolicy
         capabilities = JaroCapabilityMatrix()
+        let stopping = isStopping
         stateLock.unlock()
-        guard !alreadyBlocked else { return }
+        pendingReconnect?.cancel()
+        guard !alreadyBlocked, !stopping else { return }
 
         transitionState(
             .blockedByCostPolicy,
@@ -329,21 +364,55 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
         )
         Task { [weak self] in
             guard let self = self else { return }
-            do { try await self.localSOCKS5Server.stop() }
-            catch { self.logBuffer.append(level: "ERROR", component: "PacketTunnelProvider", message: "Unable to stop local proxy after cost-policy block: \(error.localizedDescription)") }
-            do { try await self.sshEngine.disconnect() }
-            catch { self.logBuffer.append(level: "ERROR", component: "PacketTunnelProvider", message: "Unable to close SSH session after cost-policy block: \(error.localizedDescription)") }
-            do { try await self.wireGuardEngine.stop() }
-            catch { self.logBuffer.append(level: "ERROR", component: "PacketTunnelProvider", message: "Unable to stop WireGuard after cost-policy block: \(error.localizedDescription)") }
-            do { try await self.setTunnelNetworkSettings(nil) }
-            catch { self.logBuffer.append(level: "ERROR", component: "PacketTunnelProvider", message: "Unable to remove tunnel routes after cost-policy block: \(error.localizedDescription)") }
+            await self.stopTransportsAndClearNetworkSettings()
         }
     }
 
-    private func scheduleControlledRecovery(for profile: JaroPortableProfile) {
-        reconnectTask?.cancel()
-        reconnectTask = Task { [weak self] in
+    private func suspendTunnelForUnsatisfiedPath() {
+        stateLock.lock()
+        guard !isStopping else {
+            stateLock.unlock()
+            return
+        }
+        let pendingReconnect = reconnectTask
+        reconnectTask = nil
+        let alreadySuspended = pathSuspensionTask != nil
+        capabilities = JaroCapabilityMatrix()
+        stateLock.unlock()
+        pendingReconnect?.cancel()
+        transitionState(.reconnecting, error: "Network path is not satisfied; tunnel settings are being removed and traffic is unverified")
+        guard !alreadySuspended else { return }
+
+        let task = Task { [weak self] in
             guard let self = self else { return }
+            await self.stopTransportsAndClearNetworkSettings()
+        }
+        stateLock.lock()
+        pathSuspensionTask = task
+        stateLock.unlock()
+    }
+
+    private func scheduleControlledRecovery(for profile: JaroPortableProfile) {
+        stateLock.lock()
+        guard !isStopping else {
+            stateLock.unlock()
+            return
+        }
+        let previousRecovery = reconnectTask
+        reconnectTask = nil
+        let suspension = pathSuspensionTask
+        pathSuspensionTask = nil
+        capabilities = JaroCapabilityMatrix()
+        stateLock.unlock()
+        previousRecovery?.cancel()
+
+        let task = Task { [weak self] in
+            guard let self = self else { return }
+            if let suspension = suspension { await suspension.value }
+            self.stateLock.lock()
+            let stopping = self.isStopping
+            self.stateLock.unlock()
+            guard !stopping, !Task.isCancelled else { return }
             guard let delay = self.backoff.recordFailureAndNextDelay() else {
                 self.transitionState(
                     .circuitBreakerOpen,
@@ -351,11 +420,12 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
                 )
                 return
             }
-            self.stateLock.lock()
-            self.capabilities = JaroCapabilityMatrix()
-            self.stateLock.unlock()
             self.transitionState(.reconnecting, error: nil)
-            try? await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            do {
+                try await Task.sleep(nanoseconds: UInt64(delay * 1_000_000_000))
+            } catch {
+                return
+            }
             guard !Task.isCancelled else { return }
             do {
                 switch profile.tunnelProtocol {
@@ -389,12 +459,27 @@ public final class PacketTunnelProvider: NEPacketTunnelProvider {
                     }
                 }
             } catch {
+                guard !Task.isCancelled else { return }
                 self.stateLock.lock()
                 self.capabilities = JaroCapabilityMatrix()
                 self.stateLock.unlock()
                 self.transitionState(.failed, error: error.localizedDescription)
             }
         }
+        stateLock.lock()
+        reconnectTask = task
+        stateLock.unlock()
+    }
+
+    private func stopTransportsAndClearNetworkSettings() async {
+        do { try await localSOCKS5Server.stop() }
+        catch { logBuffer.append(level: "ERROR", component: "PacketTunnelProvider", message: "Unable to stop local proxy: \(error.localizedDescription)") }
+        do { try await sshEngine.disconnect() }
+        catch { logBuffer.append(level: "ERROR", component: "PacketTunnelProvider", message: "Unable to close SSH session: \(error.localizedDescription)") }
+        do { try await wireGuardEngine.stop() }
+        catch { logBuffer.append(level: "ERROR", component: "PacketTunnelProvider", message: "Unable to stop WireGuard: \(error.localizedDescription)") }
+        do { try await setTunnelNetworkSettings(nil) }
+        catch { logBuffer.append(level: "ERROR", component: "PacketTunnelProvider", message: "Unable to remove tunnel network settings: \(error.localizedDescription)") }
     }
 
     // MARK: - Helpers & Telemetry

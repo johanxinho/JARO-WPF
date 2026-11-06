@@ -105,4 +105,33 @@ final class JaroCoreTests: XCTestCase {
             )
         )
     }
+
+    func testSharedKeychainAccessGroupMustMatchAppGroupIdentifier() throws {
+        let expectedGroup = JaroConstants.appGroupIdentifier
+        XCTAssertEqual(
+            try JaroKeychainAccessGroupResolver.resolve(
+                referenceGroup: expectedGroup,
+                configuredAccessGroup: expectedGroup
+            ),
+            expectedGroup
+        )
+        XCTAssertThrowsError(
+            try JaroKeychainAccessGroupResolver.resolve(
+                referenceGroup: expectedGroup,
+                configuredAccessGroup: ""
+            )
+        )
+        XCTAssertThrowsError(
+            try JaroKeychainAccessGroupResolver.resolve(
+                referenceGroup: "group.example.attacker",
+                configuredAccessGroup: "group.example.attacker"
+            )
+        )
+        XCTAssertThrowsError(
+            try JaroKeychainAccessGroupResolver.resolve(
+                referenceGroup: expectedGroup,
+                configuredAccessGroup: "ABCDE12345.\(expectedGroup)"
+            )
+        )
+    }
 }

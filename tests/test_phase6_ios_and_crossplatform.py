@@ -505,6 +505,30 @@ class TestPhase6NativeIOSSwiftProjectAudit(unittest.TestCase):
             "$(PRODUCT_MODULE_NAME).PacketTunnelProvider",
         )
 
+    def test_ios_packet_tunnel_and_keychain_contracts_fail_closed(self) -> None:
+        provider = (IOS_ROOT / "Sources" / "JaroPacketTunnel" / "PacketTunnelProvider.swift").read_text(encoding="utf-8")
+        vault = (IOS_ROOT / "Sources" / "JaroSecurity" / "JaroKeychainVault.swift").read_text(encoding="utf-8")
+        app_entitlements = (IOS_ROOT / "Config" / "JaroApp.entitlements").read_text(encoding="utf-8")
+        tunnel_entitlements = (IOS_ROOT / "Config" / "JaroPacketTunnel.entitlements").read_text(encoding="utf-8")
+
+        # SSH is an application proxy here, not a packetFlow IP tunnel; preserve the route guard.
+        self.assertIn("SSH/SOCKS5 mode cannot install IP routes until packetFlow forwarding is implemented", provider)
+        self.assertNotIn("packetFlow.readPackets", provider)
+        self.assertNotIn("packetFlow.writePackets", provider)
+
+        # Lifecycle must retain/cancel bring-up and clear settings on stop or loss of path.
+        self.assertIn("private var startTask: Task<Void, Never>?", provider)
+        self.assertIn("try Task.checkCancellation()", provider)
+        self.assertIn("suspendTunnelForUnsatisfiedPath()", provider)
+        self.assertIn("await self.stopTransportsAndClearNetworkSettings()", provider)
+        self.assertIn("try await setTunnelNetworkSettings(nil)", provider)
+
+        # The query uses the literal App Group; iOS Keychain enforces entitlement membership at runtime.
+        self.assertIn("JaroKeychainAccessGroupResolver.resolve(", vault)
+        self.assertIn("kSecAttrAccessGroup as String: resolvedAccessGroup", vault)
+        self.assertIn("group.com.jarocomplements.jarowpf", app_entitlements)
+        self.assertIn("group.com.jarocomplements.jarowpf", tunnel_entitlements)
+
     def test_swift_sources_delimiter_balance_and_security_invariants(self) -> None:
         swift_files = sorted(IOS_ROOT.rglob("*.swift"))
         self.assertGreaterEqual(len(swift_files), 13)

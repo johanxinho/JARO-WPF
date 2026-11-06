@@ -10,9 +10,5 @@
     <array>
         <string>group.com.jarocomplements.jarowpf</string>
     </array>
-    <key>keychain-access-groups</key>
-    <array>
-        <string>$(AppIdentifierPrefix)group.com.jarocomplements.jarowpf</string>
-    </array>
 </dict>
 </plist>

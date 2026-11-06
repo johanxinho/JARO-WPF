@@ -14,6 +14,8 @@ public enum JaroKeychainError: Error, LocalizedError {
     case unexpectedOSStatus(Int32)
     case encodingError
     case securityFrameworkUnavailable
+    case sharedAccessGroupNotConfigured
+    case invalidSharedAccessGroup(String)
 
     public var errorDescription: String? {
         switch self {
@@ -27,6 +29,10 @@ public enum JaroKeychainError: Error, LocalizedError {
             return "Failed to encode/decode UTF-8 secret material"
         case .securityFrameworkUnavailable:
             return "Apple Security.framework is only available on iOS/macOS"
+        case .sharedAccessGroupNotConfigured:
+            return "The configured shared App Group access name is empty"
+        case .invalidSharedAccessGroup(let group):
+            return "The configured Keychain access group is not the JARO WPF App Group: \(group)"
         }
     }
 }
@@ -79,21 +85,43 @@ public struct JaroKeychainReference: Equatable, Sendable {
     }
 }
 
+/// Resolves the exact App Group name used as a Keychain access group. Apple does not
+/// prepend the developer team identifier to App Group identifiers; Keychain enforces
+/// actual entitlement membership when the operation is performed.
+public enum JaroKeychainAccessGroupResolver {
+    public static func resolve(referenceGroup: String, configuredAccessGroup: String) throws -> String {
+        guard referenceGroup == JaroConstants.appGroupIdentifier else {
+            throw JaroKeychainError.invalidSharedAccessGroup(referenceGroup)
+        }
+        let configured = configuredAccessGroup.trimmingCharacters(in: .whitespacesAndNewlines)
+        guard !configured.isEmpty else {
+            throw JaroKeychainError.sharedAccessGroupNotConfigured
+        }
+        guard configured == referenceGroup else {
+            throw JaroKeychainError.invalidSharedAccessGroup(configured)
+        }
+        return configured
+    }
+}
+
 /// Production iOS/macOS Keychain store using `kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly`
 /// so `NEPacketTunnelProvider` can reconnect while the iPhone screen is locked, while preventing
 /// unencrypted cloud/device-migration key leakage.
 public final class JaroKeychainVault: JaroSecretStoreProtocol, @unchecked Sendable {
-    private let appIdentifierPrefix: String?
+    private let accessGroup: String
 
-    public init(appIdentifierPrefix: String? = nil) {
-        self.appIdentifierPrefix = appIdentifierPrefix
+    public init(accessGroup: String = JaroConstants.appGroupIdentifier) {
+        self.accessGroup = accessGroup
     }
 
     public func storeSecret(_ secretData: Data, forURI keychainURI: String) throws {
         let ref = try JaroKeychainReference(uri: keychainURI)
         #if canImport(Security)
-        var baseQuery = makeBaseQuery(for: ref)
-        SecItemDelete(baseQuery as CFDictionary)
+        var baseQuery = try makeBaseQuery(for: ref)
+        let deleteStatus = SecItemDelete(baseQuery as CFDictionary)
+        guard deleteStatus == errSecSuccess || deleteStatus == errSecItemNotFound else {
+            throw JaroKeychainError.unexpectedOSStatus(deleteStatus)
+        }
 
         baseQuery[kSecValueData as String] = secretData
         baseQuery[kSecAttrAccessible as String] = kSecAttrAccessibleAfterFirstUnlockThisDeviceOnly
@@ -110,7 +138,7 @@ public final class JaroKeychainVault: JaroSecretStoreProtocol, @unchecked Sendab
     public func loadSecret(forURI keychainURI: String) throws -> Data {
         let ref = try JaroKeychainReference(uri: keychainURI)
         #if canImport(Security)
-        var query = makeBaseQuery(for: ref)
+        var query = try makeBaseQuery(for: ref)
         query[kSecReturnData as String] = true
         query[kSecMatchLimit as String] = kSecMatchLimitOne
 
@@ -131,7 +159,7 @@ public final class JaroKeychainVault: JaroSecretStoreProtocol, @unchecked Sendab
     public func deleteSecret(forURI keychainURI: String) throws {
         let ref = try JaroKeychainReference(uri: keychainURI)
         #if canImport(Security)
-        let query = makeBaseQuery(for: ref)
+        let query = try makeBaseQuery(for: ref)
         let status = SecItemDelete(query as CFDictionary)
         guard status == errSecSuccess || status == errSecItemNotFound else {
             throw JaroKeychainError.unexpectedOSStatus(status)
@@ -142,16 +170,17 @@ public final class JaroKeychainVault: JaroSecretStoreProtocol, @unchecked Sendab
     }
 
     #if canImport(Security)
-    private func makeBaseQuery(for ref: JaroKeychainReference) -> [String: Any] {
-        var query: [String: Any] = [
+    private func makeBaseQuery(for ref: JaroKeychainReference) throws -> [String: Any] {
+        let resolvedAccessGroup = try JaroKeychainAccessGroupResolver.resolve(
+            referenceGroup: ref.accessGroup,
+            configuredAccessGroup: accessGroup
+        )
+        return [
             kSecClass as String: kSecClassGenericPassword,
             kSecAttrService as String: ref.service,
             kSecAttrAccount as String: ref.account,
+            kSecAttrAccessGroup as String: resolvedAccessGroup,
         ]
-        if let prefix = appIdentifierPrefix, !prefix.isEmpty {
-            query[kSecAttrAccessGroup as String] = "\(prefix)\(ref.accessGroup)"
-        }
-        return query
     }
     #endif
 }
