@@ -3,6 +3,7 @@
 
 import XCTest
 import JaroCore
+import JaroSecurity
 @testable import JaroDiagnostics
 @testable import JaroApp
 
@@ -45,6 +46,7 @@ final class JaroDNSWireTests: XCTestCase {
     }
 }
 
+@MainActor
 final class JaroViewModelSeparationTests: XCTestCase {
 private func makeViewModel() -> JaroDashboardViewModel {
     let mock = MockProbeTransport()
