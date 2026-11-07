@@ -45,6 +45,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.jarocomplements.jarowpf
         PRODUCT_NAME: JaroWPF
         TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: JARO_APP_ENTRY
         CODE_SIGN_ENTITLEMENTS: Config/JaroApp.entitlements
     dependencies:
       - package: JaroIOS
@@ -118,6 +119,7 @@ targets:
         PRODUCT_BUNDLE_IDENTIFIER: com.jarocomplements.jarowpf.standalone
         PRODUCT_NAME: JaroWPF-Standalone
         TARGETED_DEVICE_FAMILY: "1"
+        SWIFT_ACTIVE_COMPILATION_CONDITIONS: JARO_APP_ENTRY
         CODE_SIGN_ENTITLEMENTS: Config/JaroAppStandalone.entitlements
     dependencies:
       - package: JaroIOS
