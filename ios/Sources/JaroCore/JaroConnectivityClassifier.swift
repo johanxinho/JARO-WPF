@@ -145,6 +145,39 @@ public struct JaroConnectivityProbeConfig: Sendable {
     public static let loginMarkers: [String] = ["login", "portal", "auth", "captive", "activar", "saldo"]
 }
 
+/// Configuración de sondas aportada por el usuario desde la UI (sin secretos).
+public struct JaroProbeUserConfig: Codable, Equatable, Sendable {
+    public var dnsResolvers: [String]
+    public var dnsQueryName: String
+    public var httpsURLs: [String]
+    public var portalURL: String?
+    public var expectedBodyMarker: String?
+
+    public init(
+        dnsResolvers: [String] = [],
+        dnsQueryName: String = "",
+        httpsURLs: [String] = [],
+        portalURL: String? = nil,
+        expectedBodyMarker: String? = nil
+    ) {
+        self.dnsResolvers = dnsResolvers
+        self.dnsQueryName = dnsQueryName
+        self.httpsURLs = httpsURLs
+        self.portalURL = portalURL
+        self.expectedBodyMarker = expectedBodyMarker
+    }
+
+    public func toClassifierConfig() -> JaroConnectivityProbeConfig {
+        JaroConnectivityProbeConfig(
+            dnsResolvers: dnsResolvers,
+            dnsQueryName: dnsQueryName,
+            httpsURLs: httpsURLs,
+            portalURL: portalURL,
+            expectedBodyMarker: expectedBodyMarker
+        )
+    }
+}
+
 // MARK: - Injectable transport
 
 public struct JaroDnsProbeOutcome: Sendable {

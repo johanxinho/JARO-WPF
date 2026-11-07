@@ -30,6 +30,9 @@ public struct JaroMainView: View {
         NavigationStack {
             List {
                 statusSection
+                vpnDetailSection
+                underlyingNetworkSection
+                probeConfigSection
                 profilesSection
                 costPolicySection
                 telemetryAndCapabilitiesSection
@@ -77,6 +80,90 @@ public struct JaroMainView: View {
                 .buttonStyle(.bordered)
             }
         }
+    }
+
+    /// Estado de la VPN: detalles del perfil activo y capacidades verificadas.
+    private var vpnDetailSection: some View {
+        Section("Estado de la VPN (extensión / proxy)") {
+            if let profile = viewModel.selectedProfile {
+                LabeledContent("Servidor", value: "\(profile.host):\(profile.port)")
+                LabeledContent("Protocolo", value: profile.tunnelProtocol.rawValue)
+                if let wg = profile.wireguard {
+                    LabeledContent(
+                        "AllowedIPs / rutas incluidas",
+                        value: profile.includedRoutes.isEmpty ? "—" : profile.includedRoutes.joined(separator: ", ")
+                    )
+                    LabeledContent("DNS del perfil", value: wg.dnsServers?.joined(separator: ", ") ?? "—")
+                }
+            } else {
+                Text("Sin perfil seleccionado.").font(.footnote).foregroundStyle(.secondary)
+            }
+            LabeledContent("Estado VPN", value: viewModel.tunnelState.rawValue)
+            LabeledContent("Handshake del peer", value: viewModel.capabilityMatrix.wireguardHandshake ? "VERIFICADO" : "NO")
+            LabeledContent(
+                "RX/TX del peer",
+                value: "RX +\(viewModel.capabilityMatrix.wireguardRXDeltaBytes) B / TX +\(viewModel.capabilityMatrix.wireguardTXDeltaBytes) B"
+            )
+        }
+    }
+
+    /// Red subyacente (clasificador rev. 2): familias y dimensiones separadas.
+    private var underlyingNetworkSection: some View {
+        Section("Red Subyacente (Clasificador rev. 2)") {
+            if let result = viewModel.underlyingNetwork {
+                familyRows("IPv4", result.ipv4)
+                familyRows("IPv6", result.ipv6)
+                Text("El estado VPN (\(result.vpnTunnelState)) se reporta por separado y no altera esta clasificación.")
+                    .font(.caption)
+                    .foregroundStyle(.secondary)
+            } else {
+                Text("Sin clasificación previa. Configure sus destinos de sonda y ejecute el clasificador.")
+                    .font(.footnote)
+                    .foregroundStyle(.secondary)
+            }
+            Button("Ejecutar clasificador de red subyacente") {
+                Task { await viewModel.runConnectivityClassification() }
+            }
+            .buttonStyle(.bordered)
+        }
+    }
+
+    @ViewBuilder
+    private func familyRows(_ label: String, _ report: JaroFamilyReport) -> some View {
+        LabeledContent("\(label) — Clase", value: report.classification.rawValue)
+        LabeledContent("\(label) — Capa IP", value: report.ipLayer.rawValue)
+        LabeledContent("\(label) — DNS", value: report.dnsStatus.rawValue)
+        LabeledContent("\(label) — HTTPS", value: report.httpsStatus.rawValue)
+        LabeledContent("\(label) — Portal cautivo", value: report.portalStatus.rawValue)
+    }
+
+    /// Configuración de sondas del usuario (sin valores por defecto externos).
+    private var probeConfigSection: some View {
+        Section("Destinos de Sonda (configurados por usted)") {
+            TextField("Resolvers DNS (IP separadas por coma)", text: $probeResolversInput)
+                .jaroNoAutoCase()
+            TextField("Nombre DNS a consultar", text: $probeQueryNameInput)
+                .jaroNoAutoCase()
+            TextField("URLs HTTPS (separadas por coma)", text: $probeHttpsInput)
+                .jaroNoAutoCase()
+            Button("Guardar destinos de sonda") {
+                viewModel.saveProbeConfig(JaroProbeUserConfig(
+                    dnsResolvers: splitList(probeResolversInput),
+                    dnsQueryName: probeQueryNameInput.trimmingCharacters(in: .whitespacesAndNewlines),
+                    httpsURLs: splitList(probeHttpsInput)
+                ))
+            }
+            .disabled(probeQueryNameInput.trimmingCharacters(in: .whitespacesAndNewlines).isEmpty)
+            Text("Sin destinos configurados, DNS y HTTPS quedan NOT_PROBED y la clase máxima es IP_ONLY. Ninguna sonda usa URLs públicas por defecto.")
+                .font(.caption)
+                .foregroundStyle(.secondary)
+        }
+    }
+
+    private func splitList(_ value: String) -> [String] {
+        value.split(separator: ",")
+            .map { $0.trimmingCharacters(in: .whitespacesAndNewlines) }
+            .filter { !$0.isEmpty }
     }
 
     private var profilesSection: some View {

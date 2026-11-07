@@ -137,6 +137,7 @@ let package = Package(
                 "JaroProfiles",
                 "JaroTunnelEngine",
                 "JaroDiagnostics",
+                "JaroApp",
             ],
             path: "Tests/JaroCoreTests"
         ),

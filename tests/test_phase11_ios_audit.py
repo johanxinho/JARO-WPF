@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import plistlib
 import pathlib
+import re
 import unittest
 
 REPO = pathlib.Path(__file__).resolve().parents[1]
@@ -178,6 +179,85 @@ class WireGuardKitBuildConfigTests(unittest.TestCase):
     def test_20_kit_shared_with_extension_target(self):
         project = (IOS / "project.yml").read_text()
         self.assertIn("JaroTunnelEngine", project)
+
+
+class ProbeHardeningAuditTests(unittest.TestCase):
+    """Contratos del endurecimiento rev. 3 de sondas (túnel bypass y 15 MB)."""
+
+    REAL = (IOS / "Sources" / "JaroDiagnostics" / "JaroRealProbeTransport.swift").read_text()
+    VIEWMODEL = (IOS / "Sources" / "JaroApp" / "JaroDashboardViewModel.swift").read_text()
+    MAINVIEW = (IOS / "Sources" / "JaroApp" / "JaroMainView.swift").read_text()
+    PACKAGE = (IOS / "Package.swift").read_text()
+
+    def test_21_dns_via_udp_direct_socket_not_getaddrinfo(self):
+        self.assertIn("SOCK_DGRAM", self.REAL)
+        self.assertIn("JaroDNSWire.buildQuery", self.REAL)
+        self.assertIn("sendto(", self.REAL)
+        self.assertIn("transport=udp_direct", self.REAL)
+        # El probe DNS ya no usa getaddrinfo del sistema (resolver del túnel).
+        dns_section = self.REAL[self.REAL.find("public func dnsProbe"):]
+        dns_section = dns_section[: dns_section.find("public func httpsProbe")]
+        self.assertNotIn("getaddrinfo", dns_section)
+
+    def test_22_interface_binding_options_present(self):
+        self.assertIn("IP_BOUND_IF", self.REAL)
+        self.assertIn("IPV6_BOUND_IF", self.REAL)
+        self.assertIn("if_nametoindex", self.REAL)
+        self.assertIn("physicalInterfaceName", self.REAL)
+
+    def test_23_ephemeral_urlsession_and_immediate_invalidation(self):
+        self.assertIn("URLSessionConfiguration.ephemeral", self.REAL)
+        self.assertIn("waitsForConnectivity = false", self.REAL)
+        # https + portal (el comentario de cabecera también lo menciona).
+        self.assertGreaterEqual(self.REAL.count("session.finishTasksAndInvalidate()"), 2)
+        self.assertIn("urlCache = nil", self.REAL)
+
+    def test_24_no_default_public_destinations(self):
+        for line in self.REAL.splitlines():
+            stripped = line.strip()
+            if stripped.startswith("//") or stripped.startswith("*"):
+                continue
+            for scheme in ("https://", "http://"):
+                self.assertNotIn(scheme, line, f"URL literal inesperada: {stripped[:120]}")
+
+    def test_25_viewmodel_publishes_underlying_network_separately(self):
+        self.assertIn("@Published public private(set) var underlyingNetwork: JaroClassifierResult?", self.VIEWMODEL)
+        self.assertIn("classify(vpnTunnelState: tunnelState.rawValue)", self.VIEWMODEL)
+        self.assertIn("response.underlyingNetwork != nil", self.VIEWMODEL)
+        self.assertIn(".verifyUnderlyingNetwork", self.VIEWMODEL)
+
+    def test_26_probe_config_user_owned_and_persisted(self):
+        self.assertIn("public func saveProbeConfig(", self.VIEWMODEL)
+        self.assertIn("jaro_probe_user_config_v1", self.VIEWMODEL)
+        self.assertIn("struct JaroProbeUserConfig", (IOS / "Sources" / "JaroCore" / "JaroConnectivityClassifier.swift").read_text())
+
+    def test_27_standalone_runs_classifier_in_app_process(self):
+        # El clasificador corre en la app (red física) y por IPC solo si hay extensión.
+        self.assertIn("if !isStandaloneMode, await sendUnderlyingNetworkRequestToExtension() {", self.VIEWMODEL)
+        self.assertIn("probeTransportFactory()", self.VIEWMODEL)
+
+    def test_28_swiftui_buttons_have_actions(self):
+        # Heurística: cada Button( de la vista principal debe tener un closure
+        # con al menos una llamada (ningún botón decorativo).
+        text = self.MAINVIEW
+        count = text.count("Button(")
+        self.assertGreater(count, 0)
+        for match in re.finditer(r"Button\(([^)]*)\)\s*\{([^}]*)\}", text, re.S):
+            body = match.group(2).strip()
+            self.assertTrue(body, f"Button sin acción: {match.group(1)}")
+            self.assertGreater(len(body), 2, f"Button vacío: {match.group(1)}")
+        # Botones nuevos conectados al clasificador y a la config de sondas.
+        self.assertIn("runConnectivityClassification()", self.MAINVIEW)
+        self.assertIn("saveProbeConfig(", self.MAINVIEW)
+
+    def test_29_ui_shows_both_states_explicitly(self):
+        self.assertIn("Red Subyacente (Clasificador rev. 2)", self.MAINVIEW)
+        self.assertIn("Estado de la VPN (extensión / proxy)", self.MAINVIEW)
+        self.assertIn("se reporta por separado", self.MAINVIEW)
+        self.assertIn("\"AllowedIPs / rutas incluidas\"", self.MAINVIEW)
+
+    def test_30_test_target_includes_app_module(self):
+        self.assertIn('"JaroApp",', self.PACKAGE)
 
 
 if __name__ == "__main__":

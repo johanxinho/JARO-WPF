@@ -29,15 +29,39 @@ public final class JaroDashboardViewModel: ObservableObject {
     @Published public var isStandaloneMode: Bool = false
     @Published public private(set) var statusBannerMessage: String =
         "REMOTE_SERVER_REQUIRED: No hay servidores remotos autorizados configurados. Importe un perfil .jaroprofile o .conf propio cuando disponga de servidor."
+    /// Snapshot del clasificador rev. 2 (red subyacente). INDEPENDIENTE del
+    /// estado de la VPN: nunca se deriva de `tunnelState`.
+    @Published public private(set) var underlyingNetwork: JaroClassifierResult?
+    /// Configuración de sondas del usuario (resolvers DNS, nombres, URLs).
+    /// No contiene secretos: se persiste en UserDefaults (los perfiles y
+    /// claves sí viven en Keychain).
+    @Published public var probeConfig = JaroProbeUserConfig()
+
+    /// Perfil seleccionado actual (para los detalles de VPN en la UI).
+    public var selectedProfile: JaroPortableProfile? {
+        guard let pid = selectedProfileId else { return nil }
+        return profiles.first { $0.profileId == pid }
+    }
 
     private let secretStore: JaroSecretStoreProtocol
     private let profileManager: JaroProfileManager
     private let logBuffer = JaroRingLogBuffer(maxEntries: 120)
     private lazy var standaloneSSHEngine = JaroNativeSSHEngine(logBuffer: logBuffer)
     private lazy var standaloneSOCKS5Server = JaroLocalSOCKS5Server(sshEngine: standaloneSSHEngine, logBuffer: logBuffer)
+    private let probeTransportFactory: @Sendable () -> JaroConnectivityProbeTransport
+    private static let probeConfigDefaultsKey = "jaro_probe_user_config_v1"
 
-    public init(secretStore: JaroSecretStoreProtocol = JaroKeychainVault()) {
+    public init(
+        secretStore: JaroSecretStoreProtocol = JaroKeychainVault(),
+        probeTransportFactory: @escaping @Sendable () -> JaroConnectivityProbeTransport = { JaroRealProbeTransport() },
+        defaults: UserDefaults = .standard
+    ) {
         self.secretStore = secretStore
+        self.probeTransportFactory = probeTransportFactory
+        if let data = defaults.data(forKey: Self.probeConfigDefaultsKey),
+           let decoded = try? JSONDecoder().decode(JaroProbeUserConfig.self, from: data) {
+            self.probeConfig = decoded
+        }
         let sharedGroupURL = FileManager.default
             .containerURL(forSecurityApplicationGroupIdentifier: JaroConstants.appGroupIdentifier)?
             .appendingPathComponent("Profiles", isDirectory: true)
@@ -67,6 +91,47 @@ public final class JaroDashboardViewModel: ObservableObject {
             statusBannerMessage =
                 "Perfil autorizado cargado (\(JaroConstants.verificationStatus)). Requiere prueba real en iPhone con entitlement NetworkExtension."
         }
+    }
+
+    /// Persistencia de la configuración de sondas (sin secretos en Keychain:
+    /// resolvers y URLs no son credenciales; los perfiles/claves sí).
+    public func saveProbeConfig(_ config: JaroProbeUserConfig, defaults: UserDefaults = .standard) {
+        probeConfig = config
+        if let data = try? JSONEncoder().encode(config) {
+            defaults.set(data, forKey: Self.probeConfigDefaultsKey)
+        }
+        logBuffer.append(
+            level: "INFO", component: "JaroApp",
+            message: "Probe config saved: \(config.dnsResolvers.count) resolvers, \(config.httpsURLs.count) https targets."
+        )
+        recentLogs = logBuffer.snapshot(limit: 40)
+    }
+
+    /// Ejecuta el clasificador rev. 2 sobre la red subyacente.
+    /// - Standalone: corre EN este proceso (app principal); las sondas miden
+    ///   la red física incluso con el túnel activo.
+    /// - Full con extensión activa: envía `verify_underlying_network` por IPC.
+    public func runConnectivityClassification() async {
+        #if canImport(NetworkExtension)
+        if !isStandaloneMode, await sendUnderlyingNetworkRequestToExtension() {
+            return
+        }
+        #endif
+        let classifier = JaroConnectivityClassifier(
+            transport: probeTransportFactory(),
+            config: probeConfig.toClassifierConfig()
+        )
+        let result = classifier.classify(vpnTunnelState: tunnelState.rawValue)
+        underlyingNetwork = result
+        let ipv4 = result.ipv4.classification.rawValue
+        let ipv6 = result.ipv6.classification.rawValue
+        statusBannerMessage =
+            "Red subyacente clasificada: IPv4=\(ipv4) IPv6=\(ipv6). Estado VPN reportado por separado (\(tunnelState.rawValue))."
+        logBuffer.append(
+            level: "INFO", component: "JaroApp",
+            message: "Underlying network: ipv4=\(ipv4) ipv6=\(ipv6) (vpn=\(tunnelState.rawValue), in-app classifier)"
+        )
+        recentLogs = logBuffer.snapshot(limit: 40)
     }
 
     /// Imports an SSH profile and stores the raw Ed25519 seed only in Keychain.
@@ -346,6 +411,32 @@ public final class JaroDashboardViewModel: ObservableObject {
         applyIPCResponse(response)
     }
 
+    /// Envía `verify_underlying_network` a la extensión; devuelve false si no
+    /// hay sesión disponible (p. ej. Standalone o extensión inactiva).
+    private func sendUnderlyingNetworkRequestToExtension() async -> Bool {
+        guard let managers = try? await NETunnelProviderManager.loadAllFromPreferences(),
+              let manager = managers.first(where: Self.isJaroPacketTunnelManager),
+              let session = manager.connection as? NETunnelProviderSession else {
+            return false
+        }
+        let request = JaroTunnelIPCRequest(command: .verifyUnderlyingNetwork, dnsQueryName: probeConfig.dnsQueryName)
+        guard let payload = try? JSONEncoder().encode(request) else { return false }
+        let responseData = await withCheckedContinuation { (continuation: CheckedContinuation<Data?, Never>) in
+            do {
+                try session.sendProviderMessage(payload) { data in continuation.resume(returning: data) }
+            } catch {
+                continuation.resume(returning: nil)
+            }
+        }
+        guard let responseData,
+              let response = try? JSONDecoder().decode(JaroTunnelIPCResponse.self, from: responseData),
+              response.underlyingNetwork != nil else {
+            return false
+        }
+        applyIPCResponse(response)
+        return true
+    }
+
     private func pollExtensionSnapshot(using manager: NETunnelProviderManager) async {
         guard let session = manager.connection as? NETunnelProviderSession,
               let payload = try? JSONEncoder().encode(JaroTunnelIPCRequest(command: .statusSnapshot)) else {
@@ -368,6 +459,9 @@ public final class JaroDashboardViewModel: ObservableObject {
         trafficStats = response.stats
         capabilityMatrix = response.capabilities
         recentLogs = response.recentLogs
+        if let underlying = response.underlyingNetwork {
+            underlyingNetwork = underlying
+        }
         if let err = response.lastError {
             statusBannerMessage = err
         }
