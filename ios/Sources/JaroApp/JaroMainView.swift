@@ -21,6 +21,9 @@ public struct JaroMainView: View {
     @State private var allowFullTunnel = false
     @State private var httpsProbeURL = ""
     @State private var dnsQueryName = ""
+    @State private var probeResolversInput = ""
+    @State private var probeHttpsInput = ""
+    @State private var probeQueryNameInput = ""
 
     public init(viewModel: JaroDashboardViewModel) {
         self.viewModel = viewModel
